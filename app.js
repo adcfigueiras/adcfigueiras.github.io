@@ -4,13 +4,19 @@ const V2_KEY='adc-figueiras-team-manager-v3-dev';
 const V1_KEY='adc-figueiras-team-manager-v3-legacy-unused';
 const MODE_KEY='adc-figueiras-v3-preview-mode';
 const AUTO_BACKUP_KEY='adc-figueiras-team-manager-v3-autobackup';
-const APP_VERSION='1.3';
-const PRIVACY_POLICY_VERSION='2026-09-29-v1';
+const APP_VERSION='3.17.0';
+const PRIVACY_POLICY_VERSION='2026-10-21-v2';
+const TERMS_VERSION='2026-10-21-v1';
 const $=(s,r=document)=>r.querySelector(s);
 const $$=(s,r=document)=>[...r.querySelectorAll(s)];
 const pad=n=>String(n).padStart(2,'0');
 const uid=p=>`${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,7)}`;
 const esc=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#039;','"':'&quot;'}[c]));
+function sanitizePlainText(value,max=120){
+ return String(value??'').normalize('NFC').replace(/[\u0000-\u001f\u007f<>]/g,'').trim().slice(0,max);
+}
+const EMAIL_INPUT_PATTERN=/^[^\s@<>]{1,64}@[^\s@<>]{1,190}$/;
+const MIN_NEW_PASSWORD_LENGTH=12;
 const money=n=>new Intl.NumberFormat('pt-PT',{style:'currency',currency:'EUR'}).format(Number(n)||0);
 const nowKey=()=>{const d=new Date();return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`};
 const fmtDate=iso=>iso?new Intl.DateTimeFormat('pt-PT',{day:'2-digit',month:'2-digit',year:'numeric'}).format(new Date(`${iso}T12:00:00`)):'—';
@@ -47,6 +53,7 @@ let backendMatchCenterLoaded=false;
 let backendMatchWeightsAvailable=false;
 let backendTraining={seasonId:'',trainings:[],attendance:[],weighIns:[]};
 let backendTrainingLoaded=false;
+let backendNutritionLoaded=false;
 let backendFines={seasonId:'',rules:[],fines:[]};
 let backendFinesLoaded=false;
 let backendNotifications={rows:[],recipients:[],preferences:null};
@@ -139,7 +146,7 @@ async function refreshMyBackendProfile(){
 }
 async function updateMyProfileName(name){
  if(!backendSession?.user?.id)throw new Error('Inicia sessão para alterar o perfil.');
- const clean=String(name||'').trim();
+ const clean=sanitizePlainText(name,120);
  if(!clean)throw new Error('Indica o teu nome.');
  const {error}=await supabaseClient.rpc('update_my_profile',{p_display_name:clean});
  if(error)throw error;
@@ -147,14 +154,14 @@ async function updateMyProfileName(name){
 }
 async function requestMyMemberNumber(memberNumber){
  if(!backendSession?.user?.id)throw new Error('Inicia sessão para enviar um pedido de sócio.');
- const {error}=await supabaseClient.rpc('request_member_number',{p_member_number:String(memberNumber||'').trim()||null});
+ const {error}=await supabaseClient.rpc('request_member_number',{p_member_number:sanitizePlainText(memberNumber,30)||null});
  if(error)throw error;
  await refreshMyBackendProfile();
  if(backendRoles.includes('admin'))await loadBackendPeopleData();
 }
 async function changeMyPassword(password,password2){
  if(!backendSession?.user?.id)throw new Error('Inicia sessão para alterar a palavra-passe.');
- if(String(password||'').length<8)throw new Error('A palavra-passe deve ter pelo menos 8 caracteres.');
+ if(String(password||'').length<MIN_NEW_PASSWORD_LENGTH)throw new Error('A nova palavra-passe deve ter pelo menos 12 caracteres.');
  if(password!==password2)throw new Error('As palavras-passe não coincidem.');
  const {error}=await supabaseClient.auth.updateUser({password});
  if(error)throw error;
@@ -187,7 +194,7 @@ function appInstalled(){return !!(window.matchMedia?.('(display-mode: standalone
 function urlBase64ToUint8Array(base64String){
  const padding='='.repeat((4-base64String.length%4)%4);const base64=(base64String+padding).replace(/-/g,'+').replace(/_/g,'/');const raw=atob(base64);return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));
 }
-function pushSupported(){return !!(backendSession?.user?.id&&'serviceWorker'in navigator&&'PushManager'in window&&'Notification'in window&&location.protocol!=='file:')}
+function pushSupported(){return !!(VAPID_PUBLIC_KEY&&backendSession?.user?.id&&'serviceWorker'in navigator&&'PushManager'in window&&'Notification'in window&&location.protocol!=='file:')}
 async function loadPushDeviceStatus(){
  const supported=pushSupported();backendPushDevice={supported,permission:('Notification'in window?Notification.permission:'unsupported'),subscribed:false,endpoint:'',row:null};
  if(!supported)return backendPushDevice;
@@ -512,7 +519,9 @@ function applyBackendReferenceMetadata(){
   const league=(backendReference.competitions||[]).find(c=>c.season_id===remote.id&&c.competition_type==='league'&&c.phase!=='Taça Complementar');
   if(league)local.competitionName=`AF Porto I Divisão Futsal · ${league.series_name||league.name}`;
  }
- state.seasons=locals.sort((a,b)=>String(b.label).localeCompare(String(a.label),'pt'));
+ // As épocas online são a referência; os exemplos locais não devem ocultar os jogos reais do ambiente.
+ state.seasons=locals.filter(s=>(backendReference.seasons||[]).some(remote=>remote.id===s.backendId)).sort((a,b)=>String(b.label).localeCompare(String(a.label),'pt'));
+ state.games=(state.games||[]).filter(g=>state.seasons.some(s=>s.id===(g.seasonId||state.settings.activeSeasonId)));
  if(!state.seasons.some(x=>x.id===state.settings.activeSeasonId)){
   const current=state.seasons.find(x=>x.backendId===activeBackendId)||state.seasons[0];
   if(current)state.settings.activeSeasonId=current.id;
@@ -576,7 +585,7 @@ function applyBackendRosterToState(){
    active:r.active!==false
   };
  });
- try{localStorage.setItem(V2_KEY,JSON.stringify(state))}catch{}
+ try{persistPublicCache()}catch{}
 }
 async function loadBackendRosterData(){
  const season=backendActiveSeason();
@@ -660,7 +669,7 @@ async function createInitialBackendRoster(){
 async function saveBackendPlayer(localPlayer,data,isNew=false){
  const season=backendActiveSeason();
  if(!season)throw new Error('Não existe uma época ativa no Supabase.');
- const name=String(data.name||'').trim();
+ const name=sanitizePlainText(data.name,120);
  if(!name)throw new Error('O nome do jogador é obrigatório.');
  const numberText=String(data.number||'').trim();
  const shirtNumber=numberText===''?null:Number(numberText);
@@ -677,7 +686,7 @@ async function saveBackendPlayer(localPlayer,data,isNew=false){
   season_id:season.id,
   player_id:playerId,
   shirt_number:shirtNumber,
-  position:data.position||'Jogador',
+  position:['GR','Fixo','Fixo / Ala','Ala','Ala / Pivot','Pivot','Jogador'].includes(data.position)?data.position:'Jogador',
   position_group:data.position==='GR'?'goalkeeper':'field',
   active:true
  };
@@ -774,7 +783,7 @@ function applyBackendMatchesToState(){
   return g;
  });
  state.games=[...oldOther,...mapped];
- try{localStorage.setItem(V2_KEY,JSON.stringify(state))}catch{}
+ try{persistPublicCache()}catch{}
 }
 async function loadBackendMatchesData(){
  const season=backendActiveSeason();if(!season){backendMatches={seasonId:'',rows:[]};backendMatchesLoaded=true;return}
@@ -881,7 +890,7 @@ function applyBackendMatchCenterToState(){
    g.weighIns=weights;
   }
  }
- try{localStorage.setItem(V2_KEY,JSON.stringify(state))}catch{}
+ try{persistPublicCache()}catch{}
 }
 async function loadBackendMatchCenterData(){
  if(!backendMatchesLoaded){backendMatchCenter={matchPlayers:[],events:[],weighIns:[]};backendMatchCenterLoaded=true;backendMatchWeightsAvailable=false;return}
@@ -900,6 +909,15 @@ async function loadBackendMatchCenterData(){
  const wr=await supabaseClient.from('match_weigh_ins').select('id,match_id,player_id,timing,weight_kg,measured_at,recorded_by,created_at,updated_at').in('match_id',ids).order('measured_at',{ascending:true});
  if(!wr.error){weighIns=wr.data||[];backendMatchWeightsAvailable=true}
  backendMatchCenter={matchPlayers:playersRes.data||[],events:eventsRes.data||[],weighIns};backendMatchCenterLoaded=true;applyBackendMatchCenterToState();
+}
+async function publishBackendMatchCallup(g){
+ if(!g?.backendId||!backendConnected||!backendSession)return {published:false,recipient_count:0};
+ if(!backendRoles.some(r=>r==='admin'||r==='staff'))return {published:false,recipient_count:0};
+ const {data,error}=await supabaseClient.rpc('publish_match_callup',{p_match_id:g.backendId});
+ if(error)throw error;
+ const result=Array.isArray(data)?data[0]:data;
+ if(result?.published)loadBackendNotifications().then(()=>renderChrome()).catch(err=>console.warn('Aviso publicado, mas não foi possível atualizar a caixa de notificações.',err));
+ return result||{published:false,recipient_count:0};
 }
 async function saveBackendMatchPlayers(g,{reload=true}={}){
  if(!g?.backendId)throw new Error('Este jogo ainda não está associado ao Supabase.');
@@ -1008,7 +1026,7 @@ function applyBackendTrainingToState(){
   return {...old,id:old.id||`dbtraining_${r.id}`,backendId:r.id,seasonId:localSeasonId,date:dt.date,time:dt.time,location:r.venue||'',notes:r.notes||'',title:r.title||'Treino',status:r.status||'scheduled',entries};
  });
  state.trainings=[...other,...mapped];
- try{localStorage.setItem(V2_KEY,JSON.stringify(state))}catch{}
+ try{persistPublicCache()}catch{}
 }
 async function loadBackendTrainingData(){
  const season=backendActiveSeason();
@@ -1093,7 +1111,7 @@ function applyBackendFinesToState(){
  // O resultado já vem filtrado pelo RLS: jogador recebe apenas as próprias multas;
  // capitão/equipa técnica/admin recebem os registos permitidos. Não misturar multas locais antigas.
  state.fines=[...remoteFines];
- try{localStorage.setItem(V2_KEY,JSON.stringify(state))}catch{}
+ try{persistPublicCache()}catch{}
 }
 async function loadBackendFinesData(){
  const season=backendActiveSeason();
@@ -1136,11 +1154,11 @@ async function migrateLocalFinesToBackend(){
  let rules=0,fines=0,skipped=0;
  for(const r of [...(state.fineRules||[])]){
   if(r.backendId||r.code==='training_late')continue;
-  try{await saveBackendFineRule(r);rules++}catch(err){console.warn('Regra não migrada',r,err);skipped++}
+  try{await saveBackendFineRule(r);rules++}catch(err){console.warn('Regra não migrada:',err?.message||'erro');skipped++}
  }
  for(const f of [...(state.fines||[])]){
   if(f.backendId||f.auto||f.sourceType==='training_late')continue;
-  try{await saveBackendFine(f);fines++}catch(err){console.warn('Multa não migrada',f,err);skipped++}
+  try{await saveBackendFine(f);fines++}catch(err){console.warn('Multa não migrada:',err?.message||'erro');skipped++}
  }
  await loadBackendFinesData();return {rules,fines,skipped};
 }
@@ -1174,6 +1192,37 @@ async function loadIdentityWithOneRetry(session){
   return await loadBackendIdentity(data.session);
  }
 }
+// Apenas equipa técnica/admin pode consultar ou atualizar o template interno.
+async function loadBackendNutritionSettings(){
+ backendNutritionLoaded=false;
+ state.settings.weightReference='pre';
+ state.settings.nutritionTemplate='';
+ state.settings.nutritionEnabled=false;
+ if(!backendSession?.user?.id||!backendRoles.some(r=>r==='admin'||r==='staff'))return;
+ try{
+  const {data,error}=await supabaseClient.from('nutrition_settings').select('weight_reference,nutrition_template,nutrition_enabled').eq('id',true).maybeSingle();
+  if(error)throw error;
+  if(!data)throw new Error('Configuração privada do plano alimentar ainda não criada.');
+  state.settings.weightReference=data.weight_reference||'pre';
+  state.settings.nutritionTemplate=data.nutrition_template||'';
+  state.settings.nutritionEnabled=data.nutrition_enabled===true;
+  backendNutritionLoaded=true;
+ }catch(err){console.warn('Plano alimentar privado indisponível até à migração:',err)}
+}
+async function saveBackendNutritionSettings(weightReference,template){
+ if(!backendSession?.user?.id||!backendRoles.some(r=>r==='admin'||r==='staff'))throw new Error('Sem permissão para guardar o plano alimentar.');
+ if(!backendNutritionLoaded)throw new Error('A migração da configuração privada do plano alimentar ainda não foi aplicada no Supabase.');
+ const trimmed=String(template||'').trim();
+ const ref=['pre','post','mean'].includes(weightReference)?weightReference:'pre';
+ const {data,error}=await supabaseClient.from('nutrition_settings')
+  .update({weight_reference:ref,nutrition_template:trimmed,nutrition_enabled:!!trimmed,updated_by:backendSession.user.id,updated_at:new Date().toISOString()})
+  .eq('id',true).select('weight_reference,nutrition_template,nutrition_enabled').single();
+ if(error)throw error;
+ state.settings.weightReference=data.weight_reference||'pre';
+ state.settings.nutritionTemplate=data.nutrition_template||'';
+ state.settings.nutritionEnabled=data.nutrition_enabled===true;
+ return data;
+}
 async function loadBackendIdentity(session){
  backendSession=session;
  const userId=session?.user?.id;
@@ -1197,6 +1246,7 @@ async function loadBackendIdentity(session){
  await loadBackendRosterData();
  await loadBackendMatchesData();
  await loadBackendMatchCenterData();
+ await loadBackendNutritionSettings();
  const internalAccess=backendRoles.some(r=>['admin','staff','captain','player'].includes(r));
  if(internalAccess){
   await loadBackendTrainingData();
@@ -1335,13 +1385,14 @@ function repeatedSignupResponse(data){
 }
 
 async function completePasswordRecovery(password,password2){
- if(String(password||'').length<8){setAuthMessage('A palavra-passe deve ter pelo menos 8 caracteres.','error');return}
+ if(String(password||'').length<MIN_NEW_PASSWORD_LENGTH){setAuthMessage('A nova palavra-passe deve ter pelo menos 12 caracteres.','error');return}
  if(password!==password2){setAuthMessage('As palavras-passe não coincidem.','error');return}
  const btn=$('#recoveryPasswordBtn');if(btn){btn.disabled=true;btn.textContent='A guardar…'}setAuthMessage('');
  try{
   const {error}=await supabaseClient.auth.updateUser({password});if(error)throw error;
   passwordRecoveryMode=false;cleanAuthUrl();
   await clearLocalSupabaseSession();
+  resetPublicRuntimeState();
   showAuthGate();showAuthMode('login',false);
   const pw=$('#loginPassword');if(pw)pw.value='';
   setAuthMessage('Palavra-passe atualizada. Já podes iniciar sessão com a nova palavra-passe.','ok');
@@ -1349,16 +1400,21 @@ async function completePasswordRecovery(password,password2){
  finally{if(btn){btn.disabled=false;btn.textContent='Guardar nova palavra-passe'}}
 }
 async function signUpV3(name,email,memberNumber,password,password2){
- if(!String(name||'').trim()){setAuthMessage('Indica o teu nome.','error');return}
- if(password.length<8){setAuthMessage('A palavra-passe deve ter pelo menos 8 caracteres.','error');return}
+ const cleanName=sanitizePlainText(name,120);
+ const cleanEmail=String(email||'').trim().toLowerCase();
+ const cleanMember=sanitizePlainText(memberNumber,30);
+ if(!cleanName){setAuthMessage('Indica o teu nome.','error');return}
+ if(cleanEmail.length>254||!EMAIL_INPUT_PATTERN.test(cleanEmail)){setAuthMessage('Indica um email válido.','error');return}
+ if(password.length<MIN_NEW_PASSWORD_LENGTH){setAuthMessage('A palavra-passe deve ter pelo menos 12 caracteres.','error');return}
  if(password!==password2){setAuthMessage('As palavras-passe não coincidem.','error');return}
+ const termsCheck=$('#signupForm input[name="termsAccepted"]');
+ if(!termsCheck?.checked){setAuthMessage('Para criar conta, lê e aceita os Termos e Condições.','error');return}
  const btn=$('#signupBtn');if(btn){btn.disabled=true;btn.textContent='A criar…'}setAuthMessage('');
  try{
-  const cleanMember=String(memberNumber||'').trim();
   const {data,error}=await supabaseClient.auth.signUp({
-   email,
+   email:cleanEmail,
    password,
-   options:{emailRedirectTo:authRedirectUrl('signup'),data:{display_name:String(name||'').trim(),member_number:cleanMember||null}}
+   options:{emailRedirectTo:authRedirectUrl('signup'),data:{display_name:cleanName,member_number:cleanMember||null,terms_accepted:true,terms_version:TERMS_VERSION}}
   });
   if(error)throw error;
   if(repeatedSignupResponse(data)){
@@ -1367,7 +1423,7 @@ async function signUpV3(name,email,memberNumber,password,password2){
    return;
   }
   localStorage.setItem(PENDING_CONFIRM_EMAIL_KEY,email);
-  if(data.session){localStorage.removeItem(PENDING_CONFIRM_EMAIL_KEY);await loadIdentityWithOneRetry(data.session);showAuthenticatedApp();renderChrome();showView('dashboard');queuePostLoginOnboarding();return}
+  if(data.session){localStorage.removeItem(PENDING_CONFIRM_EMAIL_KEY);resetPublicRuntimeState();await loadIdentityWithOneRetry(data.session);showAuthenticatedApp();renderChrome();showView('dashboard');queuePostLoginOnboarding();return}
   showSignupMode(false);const em=$('#loginEmail');if(em)em.value=email;
   setAuthMessage(cleanMember?'Conta criada. Confirma o email que recebeste. O teu número de sócio ficará pendente de validação pelo clube.':'Conta criada. Confirma o email que recebeste e depois inicia sessão.','ok');
  }catch(err){
@@ -1399,6 +1455,7 @@ async function continueAsPublic(){
   // Garante que o primeiro pedido público usa a chave anónima e não um JWT antigo
   // que possa ter ficado guardado no browser de uma sessão anterior.
   await clearLocalSupabaseSession();
+  resetPublicRuntimeState();
   await loadPublicBackend();
   showAuthenticatedApp();renderChrome();showView('dashboard');
  }catch(err){
@@ -1406,6 +1463,7 @@ async function continueAsPublic(){
   if(isJwtSessionError(err)){
    try{
     await clearLocalSupabaseSession();
+    resetPublicRuntimeState();
     await loadPublicBackend();
     showAuthenticatedApp();renderChrome();showView('dashboard');
     return;
@@ -1416,6 +1474,7 @@ async function continueAsPublic(){
 }
 function leavePublicMode(){
  guestMode=false;backendSession=null;backendProfile=null;backendRoles=[];backendPlayerAccount=null;backendPrivacyAcknowledgement=null;backendPrivacyLoaded=false;backendNotifications={rows:[],recipients:[],preferences:null};backendNotificationsLoaded=false;backendNotificationSchedule={...NOTIFICATION_SCHEDULE_DEFAULTS};backendNotificationScheduleLoaded=false;backendPushDevice={supported:false,permission:'default',subscribed:false,endpoint:'',row:null};state.notifications=[];backendConnected=false;mode='public';
+ resetPublicRuntimeState();
  showAuthGate();showSignupMode(false);setAuthMessage('');
 }
 async function signInV3(email,password){
@@ -1424,17 +1483,21 @@ async function signInV3(email,password){
   const {data,error}=await supabaseClient.auth.signInWithPassword({email,password});
   if(error)throw error;
   localStorage.removeItem(PENDING_CONFIRM_EMAIL_KEY);
-  await loadIdentityWithOneRetry(data.session);
+  resetPublicRuntimeState();await loadIdentityWithOneRetry(data.session);
   showAuthenticatedApp();
   renderChrome();showView('dashboard');queuePostLoginOnboarding();
  }catch(err){
   console.error(err);setAuthMessage(friendlyAuthError(err)||'Não foi possível iniciar sessão.','error');
   try{await supabaseClient.auth.signOut()}catch{}
+  resetPublicRuntimeState();
  }finally{setAuthBusy(false)}
 }
 async function signOutV3(){
+ // A saída da conta não revoga o push do dispositivo.
+ // O utilizador pode desativá-lo expressamente nas definições de notificações.
  try{await supabaseClient?.auth.signOut()}catch(e){console.warn(e)}
  guestMode=false;backendSession=null;backendProfile=null;backendRoles=[];backendPlayerAccount=null;backendPeople={profiles:[],roles:[],links:[],invitations:[]};backendPeopleLoaded=false;backendPrivacyAcknowledgement=null;backendPrivacyLoaded=false;backendNotifications={rows:[],recipients:[],preferences:null};backendNotificationsLoaded=false;backendNotificationSchedule={...NOTIFICATION_SCHEDULE_DEFAULTS};backendNotificationScheduleLoaded=false;backendPushDevice={supported:false,permission:'default',subscribed:false,endpoint:'',row:null};state.notifications=[];backendConnected=false;mode='public';
+ resetPublicRuntimeState();
  showAuthGate();setAuthMessage('Sessão terminada.','ok');
  const pw=$('#loginPassword');if(pw)pw.value='';
 }
@@ -1468,7 +1531,7 @@ async function bootV3(){
    cleanAuthUrl();return;
   }
   if((passwordRecoveryMode||initialRecoveryHint)&&data.session){passwordRecoveryMode=true;backendSession=data.session;showAuthGate();showAuthMode('recovery',false);setAuthMessage('Link de recuperação validado. Define uma nova palavra-passe.','ok');return}
-  if(data.session){localStorage.removeItem(PENDING_CONFIRM_EMAIL_KEY);await loadIdentityWithOneRetry(data.session);showAuthenticatedApp();renderChrome();showView('dashboard');queuePostLoginOnboarding()}
+  if(data.session){localStorage.removeItem(PENDING_CONFIRM_EMAIL_KEY);resetPublicRuntimeState();await loadIdentityWithOneRetry(data.session);showAuthenticatedApp();renderChrome();showView('dashboard');queuePostLoginOnboarding()}
   else {showAuthGate();showAuthMode('login',false);if(initialAuthError){setAuthMessage(`Não foi possível validar o link: ${initialAuthError}.`,'error');cleanAuthUrl()}}
  }catch(err){console.error(err);setAuthMessage(`Ligação ao backend falhou: ${friendlyAuthError(err)}`,'error');showAuthGate()}
 }
@@ -1499,9 +1562,7 @@ function defaultState(){
   seasons:[{id:'s2627',label:'2026/27',active:true,archived:false,competitionName:'AF Porto I Divisão Futsal · Série 2'}],
   teams:seedTeams.map(t=>({...t})),
   players:seedPlayers.map(p=>({...p})),
-  users:[
-   {id:'u_david',name:'David',email:'',roles:['player','staff','admin'],playerId:'p2',memberNumber:'',active:true}
-  ],
+  users:[],
   trainings:[],games:seedClubGames(),fines:[],fineRules:[
    {id:'fr_training_late',code:'training_late',reason:'Atraso ao treino',amount:2,active:true,automatic:true,description:'Aplica automaticamente uma multa quando um jogador fica marcado como Atrasado num treino.'}
   ],competitionResults:seedFixtures.map(f=>({...f})),standings:[],notifications:[],news:[],joinRequests:[]
@@ -1518,8 +1579,7 @@ function migrateV1(v1){
  d.trainings=(v1.trainings||[]).map(t=>({...t,seasonId:'s_migrated'}));
  d.games=(v1.games||[]).map(g=>({...g,seasonId:'s_migrated',status:(g.homeScore!==''&&g.awayScore!=='')?'final':'scheduled',timeline:g.timeline||[]}));
  d.fines=(v1.fines||[]).map(f=>({...f,seasonId:'s_migrated'}));
- const david=d.players.find(p=>p.name.toLowerCase()==='david');
- d.users=[{id:'u_david',name:'David',email:'',roles:['player','staff','admin'],playerId:david?.id||'',memberNumber:'',active:true}];
+ d.users=[];
  d.notifications.push({id:uid('n'),createdAt:new Date().toISOString(),type:'system',title:'V1 migrada para V2',body:'Os dados locais existentes foram importados automaticamente para a nova estrutura.',audience:'admin',status:'sent'});
  return d;
 }
@@ -1548,6 +1608,23 @@ function mergeClubGames(existing=[]){
  existing.forEach(g=>{if(!used.has(g.id)&&!merged.some(x=>x.id===g.id))merged.push(g)});
  return merged;
 }
+// Backups JSON são ficheiros não confiáveis; recusar estruturas excessivas,
+// propriedades especiais e HTML ativo antes de as introduzir na interface.
+function sanitizeImportedSnapshot(value,depth=0){
+ if(depth>32)throw new Error('Estrutura do backup demasiado profunda.');
+ if(typeof value==='string')return value.normalize('NFC').replace(/[<>]/g,'').slice(0,8192);
+ if(Array.isArray(value)){
+  if(value.length>100000)throw new Error('Backup com demasiados registos.');
+  return value.map(v=>sanitizeImportedSnapshot(v,depth+1));
+ }
+ if(value&&typeof value==='object'){
+  const entries=Object.entries(value);
+  if(entries.length>2000)throw new Error('Objeto de backup demasiado grande.');
+  return Object.fromEntries(entries.filter(([k])=>!['__proto__','prototype','constructor'].includes(k)).map(([k,v])=>[k,sanitizeImportedSnapshot(v,depth+1)]));
+ }
+ if(value===null||typeof value==='boolean'||(typeof value==='number'&&Number.isFinite(value)))return value;
+ throw new Error('Valor inválido no backup.');
+}
 function normalizeState(raw){
  const base=defaultState();
  const out={
@@ -1572,14 +1649,72 @@ function normalizeState(raw){
  syncClubGamesToFixtures(out);
  return out;
 }
+// Apenas informação pública pode persistir no dispositivo.
+function publicCacheSnapshot(source){
+ const pick=(o,keys)=>Object.fromEntries(keys.filter(k=>o&&o[k]!==undefined).map(k=>[k,o[k]]));
+ const games=(source?.games||[]).map(g=>{
+  const published=g.status==='final'||g.status==='completed';
+  const item=pick(g,['id','backendId','seasonId','fixtureId','competitionId','competitionSlug','competitionType','officialFixture','fixture','source','date','time','round','opponent','homeAway','competition','countsForStandings','venue','status','homeScore','awayScore','halfTimeHomeScore','halfTimeAwayScore','administrativeDecision','homePenalties','awayPenalties']);
+  item.roster=published?Object.fromEntries(Object.entries(g.roster||{}).filter(([,r])=>r?.status==='Convocado').map(([id,r])=>[id,{status:'Convocado',starter:r.starter===true,used:r.used===true,stats:pick(r.stats||{},['goals','assists','yellow','secondYellow','red'])}])):{};
+  item.timeline=published?(g.timeline||[]).map(ev=>pick(ev,['id','backendId','type','minute','playerId','assistId','ownGoal'])):[];
+  item.captainId=published?g.captainId||'':'';
+  return item;
+ });
+ return {
+  schemaVersion:10,
+  settings:pick(source?.settings,['club','activeSeasonId','lastBackupAt']),
+  seasons:(source?.seasons||[]).map(s=>pick(s,['id','backendId','label','active','archived','competitionName','backendStartDate','backendEndDate'])),
+  teams:(source?.teams||[]).map(t=>pick(t,['id','name','short','logo','homeVenue','aliases','backendId'])),
+  players:(source?.players||[]).map(p=>pick(p,['id','backendId','name','position','number','active','photo_url'])),
+  games,
+  competitionResults:(source?.competitionResults||[]).map(r=>pick(r,['id','backendId','seasonId','competitionId','competitionSlug','competitionType','competition','round','date','time','home','away','homeScore','awayScore','venue','fixture','officialFixture','source','clubGameId','fromClubGame','administrativeDecision'])),
+  standings:(source?.standings||[]).map(r=>pick(r,['id','seasonId','competitionId','team','j','v','e','d','gf','ga','pts'])),
+  users:[],trainings:[],fines:[],fineRules:[],notifications:[],joinRequests:[],news:[]
+ };
+}
+function persistPublicCache(){try{localStorage.setItem(V2_KEY,JSON.stringify(publicCacheSnapshot(state)))}catch(e){console.warn('Cache pública não guardada',e)}}
+function sanitizeLegacyBrowserCache(){
+ // Não deixar uma cópia antiga com pesagens ou dados de conta em armazenamento
+ // persistente, mesmo quando o backup local não é JSON válido.
+ try{
+  const old=localStorage.getItem(AUTO_BACKUP_KEY);
+  if(old){
+   try{
+    const v=JSON.parse(old);
+    localStorage.setItem(AUTO_BACKUP_KEY,JSON.stringify({savedAt:v?.savedAt||'',data:publicCacheSnapshot(v?.data||{})}));
+   }catch(e){localStorage.removeItem(AUTO_BACKUP_KEY);console.warn('Backup antigo inválido removido da cache.',e)}
+  }
+  localStorage.removeItem(V1_KEY);
+ }catch(e){console.warn('Não foi possível limpar as chaves legadas.',e)}
+ persistPublicCache();
+}
+function resetPublicRuntimeState(){
+ state=normalizeState(publicCacheSnapshot(state));
+ backendConnected=false;
+ backendSession=null;backendProfile=null;backendRoles=[];backendPlayerAccount=null;
+ backendPrivacyAcknowledgement=null;backendPrivacyLoaded=false;
+ backendReference={settings:null,seasons:[],competitions:[],teams:[],competitionTeams:[]};backendReferenceLoaded=false;
+ backendPeople={profiles:[],roles:[],links:[],invitations:[]};backendPeopleLoaded=false;
+ backendRoster={seasonId:'',rows:[]};backendRosterLoaded=false;
+ backendMatches={seasonId:'',rows:[]};backendMatchesLoaded=false;
+ backendMatchCenter={matchPlayers:[],events:[],weighIns:[]};backendMatchCenterLoaded=false;backendMatchWeightsAvailable=false;
+ backendNutritionLoaded=false;
+ backendTraining={seasonId:'',trainings:[],attendance:[],weighIns:[]};backendTrainingLoaded=false;
+ backendFines={seasonId:'',rules:[],fines:[]};backendFinesLoaded=false;
+ backendNotifications={rows:[],recipients:[],preferences:null};backendNotificationsLoaded=false;
+ backendNotificationSchedule={...NOTIFICATION_SCHEDULE_DEFAULTS};backendNotificationScheduleLoaded=false;
+ backendPushDevice={supported:false,permission:'default',subscribed:false,endpoint:'',row:null};
+ persistPublicCache();
+}
 function loadState(){
  try{
-  const v2=localStorage.getItem(V2_KEY); if(v2) return normalizeState(JSON.parse(v2));
-  const v1=localStorage.getItem(V1_KEY); if(v1){const m=normalizeState(migrateV1(JSON.parse(v1)));localStorage.setItem(V2_KEY,JSON.stringify(m));return m;}
+  const v2=localStorage.getItem(V2_KEY); if(v2) return normalizeState(publicCacheSnapshot(JSON.parse(v2)));
+  const v1=localStorage.getItem(V1_KEY); if(v1)return normalizeState(publicCacheSnapshot(migrateV1(JSON.parse(v1))));
  }catch(e){console.warn(e)}
  return defaultState();
 }
 let state=loadState();
+sanitizeLegacyBrowserCache();
 let currentView='dashboard';
 let mode='public';
 let calendarCursor=new Date();calendarCursor.setDate(1);
@@ -1644,8 +1779,8 @@ const navDefs=[
  ]}
 ];
 const access={
- public:['dashboard','games','calendar','seriesResults','standings','team','stats','player','seasons','notifications','account','privacy'],
- member:['dashboard','games','calendar','seriesResults','standings','team','stats','player','seasons','notifications','account','privacy'],
+ public:['dashboard','games','calendar','seriesResults','standings','team','stats','player','squad','matchcenter','seasons','notifications','account','privacy'],
+ member:['dashboard','games','calendar','seriesResults','standings','team','stats','player','squad','matchcenter','seasons','notifications','account','privacy'],
  player:['dashboard','games','calendar','seriesResults','standings','team','stats','player','squad','training','weights','matchcenter','seasons','notifications','account','privacy'],
  captain:['dashboard','games','calendar','seriesResults','standings','team','stats','player','squad','training','weights','matchcenter','seasons','notifications','account','privacy','fines'],
  staff:['dashboard','games','calendar','seriesResults','standings','team','stats','player','squad','training','weights','matchcenter','seasons','notifications','account','privacy','fines','fineRules'],
@@ -1667,7 +1802,7 @@ const canManageFines=()=>isHistoricalSeason()?(backendRoles.includes('admin')&&h
 const canManageFineRules=()=>isHistoricalSeason()?(backendRoles.includes('admin')&&historicalEditMode):(mode==='staff'||mode==='admin');
 const isAdmin=()=>mode==='admin';
 
-function saveState(msg){syncClubGamesToFixtures();try{const previous=localStorage.getItem(V2_KEY);if(previous)localStorage.setItem(AUTO_BACKUP_KEY,JSON.stringify({savedAt:new Date().toISOString(),data:JSON.parse(previous)}))}catch(e){console.warn('Auto-backup falhou',e)}localStorage.setItem(V2_KEY,JSON.stringify(state));renderChrome();renderView(currentView);if(msg)toast(msg)}
+function saveState(msg){syncClubGamesToFixtures();try{const previous=localStorage.getItem(V2_KEY);if(previous)localStorage.setItem(AUTO_BACKUP_KEY,JSON.stringify({savedAt:new Date().toISOString(),data:publicCacheSnapshot(JSON.parse(previous))}))}catch(e){console.warn('Auto-backup falhou',e)}persistPublicCache();renderChrome();renderView(currentView);if(msg)toast(msg)}
 function toast(msg){const e=$('#toast');e.textContent=msg;e.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>e.classList.remove('show'),2200)}
 function activeSeason(){return state.seasons.find(s=>s.id===state.settings.activeSeasonId)||state.seasons[0]}
 async function switchSeason(seasonId){
@@ -1681,14 +1816,14 @@ async function switchSeason(seasonId){
   if(internal&&(!isHistoricalSeason()||backendRoles.includes('admin'))){await loadBackendTrainingData();await loadBackendFinesData()}
   else{backendTraining={seasonId:'',trainings:[],attendance:[],weighIns:[]};backendTrainingLoaded=false;backendFines={seasonId:'',rules:[],fines:[]};backendFinesLoaded=false}
  }
- try{localStorage.setItem(V2_KEY,JSON.stringify(state))}catch{}
+ try{persistPublicCache()}catch{}
  renderChrome();showView('dashboard');
 }
 function seasonGames(){return state.games.filter(g=>(g.seasonId||state.settings.activeSeasonId)===state.settings.activeSeasonId)}
 function seasonTrainings(){return state.trainings.filter(t=>(t.seasonId||state.settings.activeSeasonId)===state.settings.activeSeasonId)}
 function playerById(id){return state.players.find(p=>p.id===id)}
 function userByPlayer(id){return state.users.find(u=>u.playerId===id)}
-function currentUser(){if(guestMode)return {id:'guest',name:'Visitante',email:'',roles:[],playerId:'',memberNumber:'',active:true};if(backendSession)return {id:backendSession.user.id,name:backendDisplayName(),email:backendSession.user.email||'',roles:[...backendRoles],playerId:localPlayerIdForBackend(backendPlayerAccount?.player_id||''),memberNumber:backendProfile?.member_number||'',memberStatus:backendProfile?.member_status||'none',active:backendProfile?.active!==false};return state.users.find(u=>u.id==='u_david')||state.users[0]}
+function currentUser(){if(guestMode)return {id:'guest',name:'Visitante',email:'',roles:[],playerId:'',memberNumber:'',active:true};if(backendSession)return {id:backendSession.user.id,name:backendDisplayName(),email:backendSession.user.email||'',roles:[...backendRoles],playerId:localPlayerIdForBackend(backendPlayerAccount?.player_id||''),memberNumber:backendProfile?.member_number||'',memberStatus:backendProfile?.member_status||'none',active:backendProfile?.active!==false};return state.users[0]}
 function playerHtml(p){return `<div class="player"><div class="avatar">${esc(initials(p.name))}</div><div><strong>${esc(p.name)}</strong><small>${esc(p.position||'Jogador')}${p.number?` · #${esc(p.number)}`:''}</small></div></div>`}
 function playerStatHtml(p){return `<div class="player"><div class="avatar number">${esc(p.number||'—')}</div><div><strong>${esc(p.name)}</strong><small>${esc(p.position||'Jogador')}${p.number?` · #${esc(p.number)}`:''}</small></div></div>`}
 function fineRuleByCode(code){return (state.fineRules||[]).find(r=>r.code===code)}
@@ -1742,11 +1877,27 @@ function canonicalTeamName(name){
 }
 function normalizedTeamName(name){return canonicalTeamName(name)}
 function teamByName(name){const canonical=canonicalTeamName(name);const local=(state?.teams||seedTeams).find(t=>t.name===canonical)||seedTeams.find(t=>t.name===canonical);if(local)return local;const remote=backendTeamByName(canonical);return remote?{name:backendTeamName(remote),short:remote.short_name||remote.name,logo:remote.crest_url||'',homeVenue:'',aliases:[remote.name,remote.short_name].filter(Boolean)}:null}
+function safeImageSource(value){
+ const raw=String(value||'').trim();
+ if(!raw||/[\u0000-\u001f\u007f]/.test(raw))return '';
+ try{
+  const url=new URL(raw,location.href);
+  // HTTPS externo ou ficheiros do próprio site. Nunca data:, blob: ou javascript:.
+  if(url.protocol==='https:'||(url.origin===location.origin&&url.protocol==='http:'))return url.href;
+ }catch{}
+ return '';
+}
 function teamLogoHtml(name,cls=''){
  const t=teamByName(name);const n=canonicalTeamName(name);const abbr=n.split(/\s+/).filter(Boolean).slice(0,2).map(x=>x[0]).join('').toUpperCase();
- if(!t?.logo)return `<span class="team-logo ${cls}"><span class="team-logo-fallback">${esc(abbr)}</span></span>`;
- return `<span class="team-logo ${cls}"><img src="${esc(t.logo)}" alt="${esc(n)}" referrerpolicy="no-referrer" onerror="this.style.display='none';this.nextElementSibling.style.display='grid'"><span class="team-logo-fallback">${esc(abbr)}</span></span>`;
+ const src=safeImageSource(t?.logo);
+ if(!src)return `<span class="team-logo ${esc(cls)}"><span class="team-logo-fallback">${esc(abbr)}</span></span>`;
+ return `<span class="team-logo ${esc(cls)}"><img src="${esc(src)}" alt="Emblema de ${esc(n)}" referrerpolicy="no-referrer" loading="lazy"><span class="team-logo-fallback">${esc(abbr)}</span></span>`;
 }
+// Usar listener, em vez de atributos onerror inline, para permitir CSP sem unsafe-inline.
+document.addEventListener('error',event=>{
+ const img=event.target;
+ if(img?.matches?.('.team-logo img'))img.closest('.team-logo')?.classList.add('logo-failed');
+},true);
 function teamCell(name){const n=canonicalTeamName(name);return `<button class="team-cell team-link" type="button" data-team-link="${esc(n)}">${teamLogoHtml(n)}<strong>${esc(n)}</strong></button>`}
 function isFigueirasTeam(name){return canonicalTeamName(name)==='ADC Figueiras'}
 function isExtraSeriesGame(r){return !!r&&(r.fixture===false||String(r.id||'').startsWith('cr_'))}
@@ -1830,8 +1981,8 @@ function playerWeightRows(id){
  return rows.sort((a,b)=>dateTimeOf(b.date,b.time||'23:59')-dateTimeOf(a.date,a.time||'23:59'));
 }
 function playerFineRows(id){return state.fines.filter(f=>f.playerId===id&&(f.seasonId||state.settings.activeSeasonId)===state.settings.activeSeasonId).sort((a,b)=>String(b.date).localeCompare(String(a.date)))}
-function privatePlayerAccess(){return isHistoricalSeason()?backendRoles.includes('admin'):(mode==='player'||mode==='captain'||mode==='staff'||mode==='admin')}
-function canViewPlayerFines(playerId){if(isHistoricalSeason())return backendRoles.includes('admin');if(mode==='captain'||mode==='staff'||mode==='admin')return true;if(mode==='player')return currentUser()?.playerId===playerId;return false}
+function privatePlayerAccess(){const internalView=['player','captain','staff','admin'].includes(mode);return internalView&&(!isHistoricalSeason()||backendRoles.includes('admin'))}
+function canViewPlayerFines(playerId){if(mode==='public'||mode==='member')return false;if(isHistoricalSeason())return backendRoles.includes('admin');if(mode==='captain'||mode==='staff'||mode==='admin')return true;if(mode==='player')return currentUser()?.playerId===playerId;return false}
 
 function gamePlayerContribution(g,id){
  const r=g.roster?.[id]||{};let goals=0,assists=0,yellow=0,secondYellow=0,red=0;
@@ -1911,7 +2062,7 @@ function renderHistoricalDashboard(){
 function renderDashboard(){
  if(isHistoricalSeason()){renderHistoricalDashboard();return}
  const games=seasonGames(),now=new Date();const nextGame=[...games].filter(g=>dateTimeOf(g.date,g.time)>=now&&g.status!=='final').sort((a,b)=>dateTimeOf(a.date,a.time)-dateTimeOf(b.date,b.time))[0];const lastGame=[...games].filter(g=>g.status==='final'||(g.homeScore!==''&&g.awayScore!=='')).sort((a,b)=>dateTimeOf(b.date,b.time)-dateTimeOf(a.date,a.time))[0];const nextTraining=[...seasonTrainings()].filter(t=>dateTimeOf(t.date,t.time)>=now).sort((a,b)=>dateTimeOf(a.date,a.time)-dateTimeOf(b.date,b.time))[0];const stats=playerStats();const top=state.players.map(p=>({p,...stats[p.id]})).sort((a,b)=>b.goals-a.goals||b.assists-a.assists).slice(0,5);const notices=state.notifications.filter(notificationVisible).slice(-4).reverse();const standing=calculateStandings().find(r=>isFigueirasTeam(r.team));const form=teamRecentForm('ADC Figueiras',5);const me=playerById(currentUser()?.playerId);const myStats=me?stats[me.id]:null;const nextRoster=nextGame&&me?nextGame.roster?.[me.id]:null;const pendingTeamFines=state.fines.filter(f=>(f.seasonId||state.settings.activeSeasonId)===state.settings.activeSeasonId&&fineStatus(f)==='pending');const myPending=me?pendingTeamFines.filter(f=>f.playerId===me.id).reduce((s,f)=>s+Number(f.amount||0),0):0;
- const hero=nextGame?`<div class="card hero"><div class="eyebrow">Próximo jogo · ${esc(nextGame.competition||'Competição')}</div><div class="club-vs"><div class="crest"><img src="assets/adc-figueiras-emblema.png"></div><div><h2>${esc(gameTitle(nextGame))}</h2><div class="muted">${fmtDate(nextGame.date)} · ${esc(nextGame.time||'Hora por definir')}${nextGame.venue?` · ${esc(nextGame.venue)}`:''}</div></div></div><div class="hero-actions">${can('matchcenter')?`<button class="btn secondary" data-open-game="${nextGame.id}">Abrir Match Center</button>`:'<button class="btn secondary" id="dashCalendar">Ver calendário</button>'}${canEdit()?`<button class="btn secondary" data-notify-gameday="${nextGame.id}">Preparar “DIA DE JOGO!”</button>`:''}</div></div>`:`<div class="card hero"><div class="eyebrow">Época ${esc(activeSeason()?.label||'')}</div><h2>ADC Figueiras</h2><p class="muted">Ainda não existe próximo jogo registado.</p></div>`;
+ const hero=nextGame?`<div class="card hero"><div class="eyebrow">Próximo jogo · ${esc(nextGame.competition||'Competição')}</div><div class="club-vs"><div class="crest"><img src="assets/adc-figueiras-emblema.png" alt="Emblema da ADC Figueiras"></div><div><h2>${esc(gameTitle(nextGame))}</h2><div class="muted">${fmtDate(nextGame.date)} · ${esc(nextGame.time||'Hora por definir')}${nextGame.venue?` · ${esc(nextGame.venue)}`:''}</div></div></div><div class="hero-actions">${can('matchcenter')?`<button class="btn secondary" data-open-game="${nextGame.id}">Abrir Match Center</button>`:'<button class="btn secondary" id="dashCalendar">Ver calendário</button>'}${canEdit()?`<button class="btn secondary" data-notify-gameday="${nextGame.id}">Preparar “DIA DE JOGO!”</button>`:''}</div></div>`:`<div class="card hero"><div class="eyebrow">Época ${esc(activeSeason()?.label||'')}</div><h2>ADC Figueiras</h2><p class="muted">Ainda não existe próximo jogo registado.</p></div>`;
  let content='';
  if(mode==='public'||mode==='member'){
   content=`<div class="grid kpis"><div class="card kpi"><div class="label">Posição</div><div class="value">${standing?`${standing.position}.º`:'—'}</div></div><div class="card kpi"><div class="label">Pontos</div><div class="value">${standing?.pts||0}</div></div><div class="card kpi"><div class="label">Jogos concluídos</div><div class="value">${games.filter(g=>g.status==='final'||(g.homeScore!==''&&g.awayScore!=='')).length}</div></div><div class="card kpi"><div class="label">Golos</div><div class="value">${standing?.gf||0}</div><div class="sub">marcados</div></div></div><div style="height:15px"></div><div class="grid two"><div class="card"><div class="card-head"><div><h3>Forma atual</h3><p>Últimos 5 jogos do Figueiras</p></div></div>${form.length?`<div class="form-row">${form.map(x=>formPill(x.result)).join('')}</div>`:empty('Ainda sem resultados')}<div class="card-head" style="margin-top:18px"><div><h3>Último resultado</h3></div></div>${lastGame?`<div class="list-row"><div><strong>${esc(gameTitle(lastGame))}</strong><div class="meta">${fmtDate(lastGame.date)}</div></div><span class="score">${scoreText(lastGame)}</span></div>`:empty('Sem resultados')}</div><div class="card"><div class="card-head"><div><h3>Melhores marcadores</h3><p>Época ${esc(activeSeason()?.label||'')}</p></div></div>${top.some(x=>x.goals||x.assists)?`<div class="list">${top.map(x=>`<div class="list-row"><div>${playerHtml(x.p)}</div><div><strong>${x.goals}</strong> G · ${x.assists} A</div></div>`).join('')}</div>`:empty('Sem estatísticas')}</div></div>${mode==='member'?`<div style="height:15px"></div><div class="card"><div class="card-head"><div><h3>Notificações</h3><p>Informação do clube</p></div><button class="btn secondary sm" id="goNotifications">Ver todas</button></div>${notices.length?notices.map(noticeHtml).join(''):empty('Sem notificações')}</div>`:''}`;
@@ -1958,7 +2109,9 @@ function openGameManage(id){
  $$('.roster-starter').forEach(cb=>cb.onchange=()=>{if(cb.checked){const row=cb.closest('[data-rp]');$('.roster-status',row).value='Convocado';$('.roster-used',row).checked=true}});
  $$('.roster-used').forEach(cb=>cb.onchange=()=>{if(cb.checked){const row=cb.closest('[data-rp]');$('.roster-status',row).value='Convocado'}});
  $$('.roster-captain').forEach(cb=>cb.onchange=()=>{if(cb.checked){$$('.roster-captain').forEach(other=>{if(other!==cb)other.checked=false});const row=cb.closest('[data-rp]');$('.roster-status',row).value='Convocado';$('.roster-used',row).checked=true}});
- $('#saveGame').onclick=async()=>{g.date=$('#gDate').value;g.time=$('#gTime').value;g.round=$('#gRound')?.value||g.round||'';g.competition=$('#gCompetition').value.trim()||g.competition||'Jogo';const admin=$('#gAdministrative').checked;if(admin){const kind=$('#gAdminDecision').value;if(kind==='both_loss')g.administrativeDecision='both_loss';else if(kind==='fig_win')g.administrativeDecision=g.homeAway==='Casa'?'home_win':'away_win';else g.administrativeDecision=g.homeAway==='Casa'?'away_win':'home_win';g.administrativeHomeScore=kind==='both_loss'?'':$('#gAdminHome').value;g.administrativeAwayScore=kind==='both_loss'?'':$('#gAdminAway').value;g.homeScore='';g.awayScore='';g.halfTimeHomeScore='';g.halfTimeAwayScore='';g.status='final'}else{g.administrativeDecision='';g.administrativeHomeScore='';g.administrativeAwayScore='';g.homeScore=$('#gHome').value;g.awayScore=$('#gAway').value;g.halfTimeHomeScore=$('#gHalfHome').value;g.halfTimeAwayScore=$('#gHalfAway').value;g.status=$('#gStatus').value}g.countsForStandings=isCupGame(g)?false:$('#gCounts').checked;g.venue=$('#gVenue').value;let starters=0;let captainId='';$$('[data-rp]').forEach(row=>{g.roster[row.dataset.rp]=g.roster[row.dataset.rp]||{stats:{}};const starter=$('.roster-starter',row).checked;const isCaptain=$('.roster-captain',row).checked;const used=starter||isCaptain||$('.roster-used',row).checked;const status=(starter||used||isCaptain)?'Convocado':$('.roster-status',row).value;g.roster[row.dataset.rp].status=status;g.roster[row.dataset.rp].starter=starter;g.roster[row.dataset.rp].used=status==='Convocado'?used:false;if(starter)starters++;if(isCaptain)captainId=row.dataset.rp});if(starters>5){alert('Só podes selecionar até 5 jogadores para o 5 inicial.');return;}g.captainId=captainId;const btn=$('#saveGame');if(btn){btn.disabled=true;btn.textContent='A guardar…'}try{if(backendMatchesLoaded&&backendMatches.rows.length){await saveBackendClubGame(g);await saveBackendMatchPlayers(g);}closeModal();saveState('Jogo e Match Center atualizados no Supabase.')}catch(err){console.error(err);alert(`Não foi possível guardar o jogo no Supabase.\n\n${err?.message||'Erro desconhecido'}`);if(btn){btn.disabled=false;btn.textContent='Guardar'}}};
+ $('#saveGame').onclick=async()=>{g.date=$('#gDate').value;g.time=$('#gTime').value;g.round=$('#gRound')?.value||g.round||'';g.competition=$('#gCompetition').value.trim()||g.competition||'Jogo';const admin=$('#gAdministrative').checked;if(admin){const kind=$('#gAdminDecision').value;if(kind==='both_loss')g.administrativeDecision='both_loss';else if(kind==='fig_win')g.administrativeDecision=g.homeAway==='Casa'?'home_win':'away_win';else g.administrativeDecision=g.homeAway==='Casa'?'away_win':'home_win';g.administrativeHomeScore=kind==='both_loss'?'':$('#gAdminHome').value;g.administrativeAwayScore=kind==='both_loss'?'':$('#gAdminAway').value;g.homeScore='';g.awayScore='';g.halfTimeHomeScore='';g.halfTimeAwayScore='';g.status='final'}else{g.administrativeDecision='';g.administrativeHomeScore='';g.administrativeAwayScore='';g.homeScore=$('#gHome').value;g.awayScore=$('#gAway').value;g.halfTimeHomeScore=$('#gHalfHome').value;g.halfTimeAwayScore=$('#gHalfAway').value;g.status=$('#gStatus').value}g.countsForStandings=isCupGame(g)?false:$('#gCounts').checked;g.venue=$('#gVenue').value;let starters=0;let captainId='';$$('[data-rp]').forEach(row=>{g.roster[row.dataset.rp]=g.roster[row.dataset.rp]||{stats:{}};const starter=$('.roster-starter',row).checked;const isCaptain=$('.roster-captain',row).checked;const used=starter||isCaptain||$('.roster-used',row).checked;const status=(starter||used||isCaptain)?'Convocado':$('.roster-status',row).value;g.roster[row.dataset.rp].status=status;g.roster[row.dataset.rp].starter=starter;g.roster[row.dataset.rp].used=status==='Convocado'?used:false;if(starter)starters++;if(isCaptain)captainId=row.dataset.rp});if(starters>5){alert('Só podes selecionar até 5 jogadores para o 5 inicial.');return;}g.captainId=captainId;const btn=$('#saveGame');if(btn){btn.disabled=true;btn.textContent='A guardar…'}try{if(backendMatchesLoaded&&backendMatches.rows.length){await saveBackendClubGame(g);await saveBackendMatchPlayers(g);}let callupResult=null;let callupError=null;if(g.backendId&&Object.values(g.roster||{}).some(r=>normalizeRosterStatus(r?.status)==='Convocado')&&g.status!=='final'){
+ try{callupResult=await publishBackendMatchCallup(g)}catch(err){callupError=err;console.error('Convocatória guardada, mas publicação/aviso público pendente:',err)}
+}closeModal();saveState(callupError?'Jogo guardado. Atenção: a convocatória pública não foi confirmada.':callupResult?.published?'Convocatória publicada e aviso geral criado.':'Jogo e Match Center atualizados no Supabase.');if(callupError)alert('A ficha de jogo foi guardada, mas a publicação e/ou notificação da convocatória falhou. Verifica a migração do Supabase antes de voltares a tentar.\\n\\n'+(callupError.message||'Erro desconhecido'));}catch(err){console.error(err);alert(`Não foi possível guardar o jogo no Supabase.\n\n${err?.message||'Erro desconhecido'}`);if(btn){btn.disabled=false;btn.textContent='Guardar'}}};
  $('#deleteGame')&&($('#deleteGame').onclick=async()=>{if(!confirm('Eliminar este jogo?'))return;try{if(g.backendId&&backendMatchesLoaded&&backendMatches.rows.length)await deleteBackendMatchById(g.backendId);state.games=state.games.filter(x=>x.id!==g.id);closeModal();saveState('Jogo eliminado.')}catch(err){console.error(err);alert(`Não foi possível eliminar o jogo.\n\n${err?.message||'Erro desconhecido'}`)}});$('[data-close]').onclick=closeModal;
 }
 
@@ -2067,6 +2220,7 @@ async function prepareNutritionNotifications(id){
  const ids=Object.entries(g.roster||{}).filter(([,r])=>r.status==='Convocado').map(([id])=>id);
  if(!ids.length){toast('Ainda não há jogadores convocados.');return}
  if(!g.backendId){toast('Guarda primeiro o jogo online.');return}
+ if(!backendNutritionLoaded){toast('É necessário configurar primeiro o plano alimentar seguro no Supabase.');return}
  openNotificationTimingModal({heading:'Plano pré-jogo',description:`${gameTitle(g)} · ${ids.length} convocado(s)`,kind:'nutrition',entity:g,onConfirm:async({mode,scheduledFor})=>{
   let sent=0;
   for(const pid of ids){
@@ -2148,7 +2302,7 @@ function renderAccount(){
   <div class="release-check-item"><span>N.º de sócio</span>${memberCheck}</div>
  </div><div class="form-actions"><button class="btn secondary" id="accountPrivacy">Ver privacidade</button>${!pushOk&&backendPushDevice.supported&&backendPushDevice.permission!=='denied'?'<button class="btn secondary" id="accountEnablePush">Ativar notificações</button>':''}</div></div>
  <div style="height:15px"></div><div class="grid equal2"><div class="card"><div class="card-head"><div><h3>Perfil</h3><p>Informação apresentada na aplicação.</p></div></div><form id="myProfileForm"><div class="form-grid"><div class="field full"><label>Nome</label><input name="displayName" value="${esc(backendDisplayName())}" required></div><div class="field full"><label>Email</label><input value="${esc(backendSession.user.email||'')}" disabled><small>O email de autenticação não é alterado aqui.</small></div></div><div class="form-actions"><button class="btn" id="saveMyProfile">Guardar nome</button></div></form></div><div class="card"><div class="card-head"><div><h3>Número de sócio</h3><p>Validação obrigatória pelo clube.</p></div></div>${memberStatusAccountHtml()}<div style="height:12px"></div><form id="memberRequestForm"><div class="field"><label>N.º de sócio</label><input name="memberNumber" value="${esc(backendProfile?.member_number||'')}" ${verified?'disabled':''} placeholder="Ex.: 123"><small>${verified?'Número validado. Apenas um Admin o pode alterar.':pending?'Podes corrigir o número enquanto o pedido estiver pendente. Qualquer alteração continua pendente de aprovação.':'O pedido ficará pendente até validação por um Admin.'}</small></div>${verified?'':`<div class="form-actions"><button class="btn" id="saveMemberRequest">${pending?'Atualizar pedido':'Enviar para aprovação'}</button>${pending?'<button type="button" class="btn secondary" id="cancelMemberRequest">Cancelar pedido</button>':''}</div>`}</form></div></div>
- <div style="height:15px"></div><div class="card"><div class="card-head"><div><h3>Segurança</h3><p>Alterar a palavra-passe desta conta.</p></div></div><form id="changePasswordForm"><div class="form-grid"><div class="field"><label>Nova palavra-passe</label><input name="password" type="password" autocomplete="new-password" minlength="8" required></div><div class="field"><label>Confirmar nova palavra-passe</label><input name="password2" type="password" autocomplete="new-password" minlength="8" required></div></div><div class="form-actions"><button class="btn" id="changeMyPasswordBtn">Alterar palavra-passe</button></div></form><div class="note">Usa pelo menos 8 caracteres. Se não te lembrares da palavra-passe atual, usa “Esqueci-me da palavra-passe” no ecrã de login.</div></div>`;
+ <div style="height:15px"></div><div class="card"><div class="card-head"><div><h3>Segurança</h3><p>Alterar a palavra-passe desta conta.</p></div></div><form id="changePasswordForm"><div class="form-grid"><div class="field"><label>Nova palavra-passe</label><input name="password" type="password" autocomplete="new-password" minlength="12" required></div><div class="field"><label>Confirmar nova palavra-passe</label><input name="password2" type="password" autocomplete="new-password" minlength="8" required></div></div><div class="form-actions"><button class="btn" id="changeMyPasswordBtn">Alterar palavra-passe</button></div></form><div class="note">Usa pelo menos 8 caracteres. Se não te lembrares da palavra-passe atual, usa “Esqueci-me da palavra-passe” no ecrã de login.</div></div>`;
  $('#accountPrivacy').onclick=()=>showView('privacy');
  $('#accountEnablePush')&&($('#accountEnablePush').onclick=async()=>{const b=$('#accountEnablePush');b.disabled=true;b.textContent='A ativar…';try{await activatePushOnDevice();renderAccount();renderChrome();toast('Notificações ativadas neste dispositivo.')}catch(err){console.error(err);alert(`Não foi possível ativar as notificações.\n\n${err?.message||'Erro desconhecido'}`);b.disabled=false;b.textContent='Ativar notificações'}});
  $('#myProfileForm').onsubmit=async e=>{e.preventDefault();const fd=new FormData(e.target),b=$('#saveMyProfile');b.disabled=true;b.textContent='A guardar…';try{await updateMyProfileName(fd.get('displayName'));renderChrome();renderAccount();toast('Perfil atualizado.')}catch(err){console.error(err);alert(`Não foi possível atualizar o perfil.\n\n${err?.message||'Erro desconhecido'}`);b.disabled=false;b.textContent='Guardar nome'}};
@@ -2162,9 +2316,10 @@ function renderPrivacy(){
  const acknowledged=privacyAcknowledged();
  const ackWhen=backendPrivacyAcknowledgement?.acknowledged_at?fmtDateTime(backendPrivacyAcknowledgement.acknowledged_at):'';
  $('#view-privacy').innerHTML=`<div class="section-head"><div><h2>Privacidade</h2><p>Como a plataforma ADC Figueiras utiliza e apresenta os dados.</p></div>${logged?(acknowledged?pill('Confirmada','green'):pill('Por confirmar','amber')):pill('Informação pública','gray')}</div>
- <div class="grid equal2"><div class="card"><div class="card-head"><div><h3>Que dados existem</h3><p>O conteúdo depende da função atribuída.</p></div></div><div class="privacy-list"><div><strong>Dados públicos do clube</strong><span>Jogos, resultados, classificação, estatísticas desportivas e informação pública dos jogadores.</span></div><div><strong>Conta</strong><span>Nome, email, funções, eventual número de sócio e preferências de notificações.</span></div><div><strong>Dados internos da equipa</strong><span>Convocatórias, presenças, disponibilidade, pesagens, multas e registos do Match Center.</span></div><div><strong>Notificações</strong><span>Quando ativas push, é guardada uma subscrição técnica do dispositivo para permitir a entrega dos avisos.</span></div></div></div>
- <div class="card"><div class="card-head"><div><h3>Quem pode ver</h3><p>Acesso por função, aplicado também no backend.</p></div></div><div class="privacy-list"><div><strong>Público / Registado / Sócio</strong><span>Não vê presenças, pesagens, multas nem dados internos de convocatórias futuras.</span></div><div><strong>Jogador</strong><span>Tem acesso à área interna do plantel, treinos e pesagens. As pesagens dos colegas são visíveis aos jogadores, conforme a política atual do clube. Nas multas, cada jogador vê apenas os seus próprios registos.</span></div><div><strong>Capitão</strong><span>Tem os acessos de jogador e pode consultar e gerir as multas individuais da equipa, mas não altera as regras de multas.</span></div><div><strong>Equipa Técnica / Admin</strong><span>Gerem os dados internos necessários às respetivas funções. O Admin gere também contas e permissões.</span></div></div></div></div>
+ <div class="grid equal2"><div class="card"><div class="card-head"><div><h3>Que dados existem</h3><p>O conteúdo depende da função atribuída.</p></div></div><div class="privacy-list"><div><strong>Dados públicos do clube</strong><span>Jogos, resultados, classificação, estatísticas desportivas e informação pública dos jogadores.</span></div><div><strong>Conta</strong><span>Nome, email, funções, eventual número de sócio e preferências de notificações.</span></div><div><strong>Dados internos da equipa</strong><span>Convocatórias ainda não publicadas, presenças, disponibilidade, pesagens, multas e registos não públicos dos jogos.</span></div><div><strong>Notificações</strong><span>Quando ativas push, é guardada uma subscrição técnica do dispositivo para permitir a entrega dos avisos.</span></div></div></div>
+ <div class="card"><div class="card-head"><div><h3>Quem pode ver</h3><p>Acesso por função, aplicado também no backend.</p></div></div><div class="privacy-list"><div><strong>Público / Registado / Sócio</strong><span>Pode consultar o Plantel, as fichas e estatísticas desportivas dos jogadores e os dados públicos do Match Center, sem acesso a presenças, disponibilidade, pesagens, multas ou convocatórias ainda não publicadas. A convocatória fica visível após a publicação pela equipa técnica.</span></div><div><strong>Jogador</strong><span>Tem acesso à área interna do plantel, treinos e pesagens. Todos os jogadores podem consultar as pesagens dos colegas na área interna, conforme a regra estabelecida pelo clube. Nas multas, cada jogador vê apenas os seus próprios registos.</span></div><div><strong>Capitão</strong><span>Tem os acessos de jogador e pode consultar e gerir as multas individuais da equipa, mas não altera as regras de multas.</span></div><div><strong>Equipa Técnica / Admin</strong><span>Gerem os dados internos necessários às respetivas funções. O Admin gere também contas e permissões.</span></div></div></div></div>
  <div style="height:15px"></div><div class="card"><div class="card-head"><div><h3>Controlo e transparência</h3><p>Versão da política: ${esc(PRIVACY_POLICY_VERSION)}</p></div></div><div class="note">As notificações push podem ser desativadas por dispositivo e as preferências por tipo de aviso podem ser alteradas na área Notificações. O número de sócio indicado pelo utilizador fica pendente até validação por um Admin. Para corrigir dados da conta ou esclarecer o tratamento dos dados, contacta o clube através de <strong>adcf2015@gmail.com</strong>.</div>${logged?`<div style="height:12px"></div>${acknowledged?`<div class="info-strip"><strong>Política apresentada e confirmada</strong>${ackWhen?` · ${esc(ackWhen)}`:''}.</div>`:`<div class="warning-strip">Ainda não confirmaste que esta política te foi apresentada.</div><div class="form-actions"><button class="btn" id="ackPrivacy">Tomei conhecimento</button></div>`}`:''}</div>
+ <div style="height:15px"></div><div class="card"><div class="card-head"><div><h3>Documentos legais</h3><p>Consulta as páginas informativas completas antes de continuares.</p></div></div><div class="inline-actions"><a class="btn secondary sm" href="termos.html" target="_blank" rel="noopener noreferrer">Termos e Condições</a><a class="btn secondary sm" href="privacidade.html" target="_blank" rel="noopener noreferrer">Política de Privacidade</a><a class="btn secondary sm" href="cookies.html" target="_blank" rel="noopener noreferrer">Política de Cookies</a></div></div>
  <div style="height:15px"></div><div class="card"><div class="card-head"><div><h3>Nota</h3></div></div><div class="note">Esta página descreve o funcionamento da aplicação e os acessos configurados. A confirmação acima regista apenas a tomada de conhecimento desta informação; não substitui outras obrigações legais ou organizativas que possam aplicar-se ao clube.</div></div>`;
  $('#ackPrivacy')&&($('#ackPrivacy').onclick=async()=>{const b=$('#ackPrivacy');b.disabled=true;b.textContent='A guardar…';try{await acknowledgePrivacyNotice();renderPrivacy();renderChrome();toast('Privacidade confirmada.');queuePushOnboarding()}catch(err){console.error(err);alert(`Não foi possível guardar a confirmação.\n\n${err?.message||'Erro desconhecido'}`);b.disabled=false;b.textContent='Tomei conhecimento'}});
 }
@@ -2176,7 +2331,7 @@ function openTrainingManage(id){const t=state.trainings.find(x=>x.id===id);if(!t
 function renderWeights(){const ref=state.settings.weightReference;const cards=state.players.map(p=>{const l=latestWeight(p.id);const avg=avgWeightLast14(p.id,nowKey());return `<div class="weight-card"><div>${playerHtml(p)}</div><div><div class="weight-label">Último pré</div><div class="weight-number">${l?.pre?`${l.pre.toFixed(1)} kg`:'—'}</div></div><div><div class="weight-label">Último pós</div><div class="weight-number">${l?.post?`${l.post.toFixed(1)} kg`:'—'}</div></div><div><div class="weight-label">Média 2 semanas</div><div class="weight-number">${avg?`${avg.toFixed(1)} kg`:'—'}</div></div></div>`}).join('');$('#view-weights').innerHTML=`<div class="section-head"><div><h2>Pesagens do plantel</h2><p>Os atletas podem consultar as próprias pesagens e as dos colegas.</p></div>${canEdit()?`<span class="pill blue">Referência plano: ${ref==='pre'?'pré-treino':ref==='post'?'pós-treino':'média pré/pós'}</span>`:''}</div><div class="warning-strip">As pesagens são dados internos. Na configuração atual, Jogadores, Capitão, Equipa Técnica e Admin podem consultá-las; Público e Sócios sem função interna não têm acesso. Consulta a área Privacidade para mais detalhes.</div><div style="height:12px"></div><div class="grid">${cards||empty('Sem jogadores')}</div>`}
 
 function renderSquad(){
- const stats=playerStats();const historical=isHistoricalSeason(),showPrivate=!historical||backendRoles.includes('admin');const sorted=[...state.players].sort((a,b)=>{const ag=a.position==='GR'?0:1,bg=b.position==='GR'?0:1;if(ag!==bg)return ag-bg;const an=Number(a.number),bn=Number(b.number);if(Number.isFinite(an)&&Number.isFinite(bn))return an-bn;return a.name.localeCompare(b.name,'pt')});
+ const stats=playerStats();const historical=isHistoricalSeason(),showPrivate=privatePlayerAccess();const sorted=[...state.players].sort((a,b)=>{const ag=a.position==='GR'?0:1,bg=b.position==='GR'?0:1;if(ag!==bg)return ag-bg;const an=Number(a.number),bn=Number(b.number);if(Number.isFinite(an)&&Number.isFinite(bn))return an-bn;return a.name.localeCompare(b.name,'pt')});
  $('#view-squad').innerHTML=`<div class="section-head"><div><h2>${historical?'Plantel histórico':'Plantel'}</h2><p>${historical?`ADC Figueiras · Época ${esc(activeSeason()?.label||'')}`:'Plantel visual, disponibilidade e estatísticas da época.'}</p></div>${canEdit()?'<button class="btn" id="addPlayer">＋ Jogador</button>':''}</div><div class="squad-grid">${sorted.map(p=>{const st=stats[p.id]||{};return `<article class="squad-card" data-player-profile="${p.id}"><div class="squad-card-top"><div class="squad-number ${p.position==='GR'?'keeper':'field'}">${esc(p.number||'—')}</div><div class="squad-identity"><div class="eyebrow">${esc(p.position||'Jogador')}</div><h3>${esc(p.name)}</h3>${showPrivate&&p.status?pill(normalizePlayerStatus(p.status),statusPillType(p.status)):''}</div></div><div class="squad-mini-stats"><span><strong>${st.games||0}</strong> jogos</span><span><strong>${st.goals||0}</strong> G</span><span><strong>${st.assists||0}</strong> A</span></div><div class="squad-actions"><button class="btn secondary sm view-player" data-id="${p.id}">Ficha</button>${canEdit()?`<button class="btn secondary sm edit-player" data-id="${p.id}">Editar</button>`:''}</div></article>`}).join('')}</div>`;$('#addPlayer')&&($('#addPlayer').onclick=()=>openPlayer());$$('.view-player').forEach(b=>b.onclick=e=>{e.stopPropagation();openPlayerProfile(b.dataset.id)});$$('.squad-card').forEach(r=>r.onclick=()=>openPlayerProfile(r.dataset.playerProfile));$$('.edit-player').forEach(b=>b.onclick=e=>{e.stopPropagation();openPlayer(b.dataset.id)})
 }
 function openPlayer(id=''){
@@ -2185,6 +2340,8 @@ function openPlayer(id=''){
  $('#playerForm').onsubmit=async e=>{
   e.preventDefault();
   const d=Object.fromEntries(new FormData(e.target));
+  d.name=sanitizePlainText(d.name,120);
+  if(!d.name){alert('Indica o nome do jogador.');return}
   const btn=$('#savePlayerBtn');if(btn){btn.disabled=true;btn.textContent='A guardar…'}
   try{
    if(backendConnected&&backendRosterLoaded&&backendRoster.rows.length){
@@ -2206,7 +2363,7 @@ function openPlayer(id=''){
  $('[data-close]').onclick=closeModal
 }
 function renderPlayerProfile(){
- const p=playerById(selectedPlayerId)||state.players[0];if(!p){$('#view-player').innerHTML=empty('Sem jogadores');return}selectedPlayerId=p.id;sessionStorage.setItem('playerView',p.id);const s=playerStats()[p.id]||{};const privateOk=privatePlayerAccess();const finePrivateOk=canViewPlayerFines(p.id);const att=playerAttendanceStats(p.id);const weights=playerWeightRows(p.id);const fines=finePrivateOk?playerFineRows(p.id):[];const latest=weights[0];const pending=fines.filter(f=>fineStatus(f)==='pending').reduce((sum,f)=>sum+Number(f.amount||0),0);
+ const p=playerById(selectedPlayerId)||state.players[0];if(!p){$('#view-player').innerHTML=empty('Sem jogadores');return}selectedPlayerId=p.id;sessionStorage.setItem('playerView',p.id);const s=playerStats()[p.id]||{};const privateOk=privatePlayerAccess();const finePrivateOk=canViewPlayerFines(p.id);const att=privateOk?playerAttendanceStats(p.id):{recorded:0,present:0,pct:0};const weights=privateOk?playerWeightRows(p.id):[];const fines=finePrivateOk?playerFineRows(p.id):[];const latest=weights[0];const pending=fines.filter(f=>fineStatus(f)==='pending').reduce((sum,f)=>sum+Number(f.amount||0),0);
  $('#view-player').innerHTML=`<div class="section-head"><div><button class="back-link" id="backSquad">← Plantel</button><h2>${esc(p.name)}</h2><p>#${esc(p.number||'—')} · ${esc(p.position||'Jogador')}</p></div>${canEdit()?`<button class="btn secondary" id="editProfilePlayer">Editar jogador</button>`:''}</div><div class="player-profile-hero card"><div class="profile-number ${p.position==='GR'?'keeper':'field'}">${esc(p.number||'—')}</div><div><div class="eyebrow">${esc(p.position||'Jogador')}</div><h2>${esc(p.name)}</h2>${privateOk?`<div class="tags">${pill(normalizePlayerStatus(p.status),statusPillType(p.status))}</div>`:''}</div></div><div style="height:15px"></div><div class="grid kpis player-kpis"><div class="card kpi"><div class="label">Convocatórias</div><div class="value">${s.callups||0}</div></div><div class="card kpi"><div class="label">Jogos</div><div class="value">${s.games||0}</div></div><div class="card kpi"><div class="label">Titularidades</div><div class="value">${s.starts||0}</div></div><div class="card kpi"><div class="label">Golos</div><div class="value">${s.goals||0}</div></div><div class="card kpi"><div class="label">Assistências</div><div class="value">${s.assists||0}</div></div><div class="card kpi"><div class="label">Cartões</div><div class="value cards-value"><span title="Amarelos">A ${s.yellow||0}</span><span title="Duplo amarelo">AA ${s.secondYellow||0}</span><span title="Vermelhos diretos">V ${s.red||0}</span></div></div></div><div style="height:15px"></div><div class="card"><div class="card-head"><div><h3>Últimos 5 jogos</h3><p>Últimas utilizações · adversário, contribuições para golo e disciplina.</p></div></div>${playerRecentGamesHtml(p.id)}</div>${privateOk?`<div style="height:15px"></div><div class="grid two"><div class="card"><div class="card-head"><div><h3>Treinos</h3><p>Área interna.</p></div></div><div class="private-stat"><strong>${att.present}</strong><span>presenças</span></div><div class="private-stat"><strong>${att.pct}%</strong><span>assiduidade (${att.present}/${att.recorded||0})</span></div></div><div class="card"><div class="card-head"><div><h3>Pesagens</h3><p>Último registo.</p></div></div>${latest?`<div class="grid equal2"><div><div class="weight-label">Último pré</div><div class="weight-number">${latest.pre?`${Number(latest.pre).toFixed(1)} kg`:'—'}</div></div><div><div class="weight-label">Último pós</div><div class="weight-number">${latest.post?`${Number(latest.post).toFixed(1)} kg`:'—'}</div></div></div>`:empty('Sem pesagens registadas')}</div></div><div style="height:15px"></div><div class="card"><div class="card-head"><div><h3>Evolução do peso</h3><p>Visível apenas a jogadores e equipa técnica.</p></div></div>${weightChartHtml(p.id)}</div>${finePrivateOk?`<div style="height:15px"></div><div class="card"><div class="card-head"><div><h3>Multas</h3><p>${mode==='player'?'As tuas multas da época.':'Histórico interno da época.'}</p></div><strong>${money(pending)} pendente</strong></div>${fines.length?`<div class="table-wrap"><table><thead><tr><th>Data</th><th>Motivo</th><th>Valor</th><th>Estado</th></tr></thead><tbody>${fines.map(f=>`<tr><td>${fmtDate(f.date)}</td><td>${esc(f.reason)}</td><td>${money(f.amount)}</td><td>${pill(fineStatusLabel(fineStatus(f)),fineStatusPill(fineStatus(f)))}</td></tr>`).join('')}</tbody></table></div>`:empty('Sem multas registadas')}</div>`:''}`:''}`;
  $('#backSquad').onclick=()=>showView('squad');$('#editProfilePlayer')&&($('#editProfilePlayer').onclick=()=>openPlayer(p.id));$$('[data-recent-game]').forEach(b=>b.onclick=()=>{sessionStorage.setItem('mcGame',b.dataset.recentGame);showView('matchcenter')});
 }
@@ -2290,7 +2447,7 @@ function renderCalendar(){
  events=events.map((e,i)=>({...e,_calendarKey:String(i)}));
  let days='';
  for(let i=0;i<42;i++){const d=new Date(start);d.setDate(start.getDate()+i);const k=`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;const muted=d.getMonth()!==calendarCursor.getMonth();days+=`<div class="calendar-day ${muted?'muted':''} ${k===nowKey()?'today':''}"><div class="day-num">${d.getDate()}</div>${events.filter(e=>e.date===k).sort((a,b)=>String(a.time).localeCompare(String(b.time))).map(e=>`<button class="cal-event ${e.type==='game'?'game':''} ${e.isClub?'club':''}" data-cal-event="${e._calendarKey}">${esc(e.label)}</button>`).join('')}</div>`}
- $('#view-calendar').innerHTML=`<div class="calendar-head"><button class="btn secondary sm" id="prevMonth">←</button><h2>${fmtMonth(calendarCursor)}</h2><button class="btn secondary sm" id="nextMonth">→</button></div><div class="toolbar calendar-toolbar"><div class="field result-filter"><label>Mostrar</label><select id="calendarFilter"><option value="all" ${calendarEventFilter==='all'?'selected':''}>Tudo</option><option value="club" ${calendarEventFilter==='club'?'selected':''}>Só ADC Figueiras</option><option value="training" ${calendarEventFilter==='training'?'selected':''}>Só treinos</option></select></div></div><div class="calendar-grid">${['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'].map(x=>`<div class="dow">${x}</div>`).join('')}${days}</div>`;
+ $('#view-calendar').innerHTML=`<div class="calendar-head"><button class="btn secondary sm" id="prevMonth">←</button><h2>${fmtMonth(calendarCursor)}</h2><button class="btn secondary sm" id="nextMonth">→</button></div><div class="toolbar calendar-toolbar"><div class="field result-filter"><label>Mostrar</label><select id="calendarFilter"><option value="all" ${calendarEventFilter==='all'?'selected':''}>Tudo</option><option value="club" ${calendarEventFilter==='club'?'selected':''}>Só ADC Figueiras</option><option value="training" ${calendarEventFilter==='training'?'selected':''}>Só treinos</option></select></div></div><p class="calendar-scroll-hint">← Desliza o calendário para veres os restantes dias →</p><div class="calendar-scroll" role="region" aria-label="Calendário: desliza horizontalmente para consultar os sete dias da semana" tabindex="0"><div class="calendar-grid">${['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'].map(x=>`<div class="dow">${x}</div>`).join('')}${days}</div></div>`;
  $('#prevMonth').onclick=()=>{calendarCursor.setMonth(calendarCursor.getMonth()-1);renderCalendar()};$('#nextMonth').onclick=()=>{calendarCursor.setMonth(calendarCursor.getMonth()+1);renderCalendar()};
  $('#calendarFilter').onchange=e=>{calendarEventFilter=e.target.value;renderCalendar()};
  $$('[data-cal-event]').forEach(b=>b.onclick=()=>openCalendarEventInfo(events.find(e=>e._calendarKey===b.dataset.calEvent)));
@@ -2336,6 +2493,7 @@ function renderSeasons(){
 function rolePills(roles=[]){return roles.length?roles.map(r=>pill(roleLabel(r),r==='admin'?'purple':r==='staff'?'blue':r==='captain'?'amber':r==='player'?'green':'gray')).join(''):pill('Registado','gray')}
 function memberAccessHtml(u){if(u.roles?.includes('member')||u.memberStatus==='verified')return `${esc(u.memberNumber||'—')} ${pill('Validado','green')}`;if(u.memberStatus==='pending')return `${esc(u.memberNumber||'—')} ${pill('Por validar','amber')}`;return '—'}
 function renderPeople(){
+ if(!backendSession?.user?.id||!backendRoles.includes('admin')){$('#view-people').innerHTML=empty('Sem acesso','Apenas administradores podem consultar e gerir utilizadores.');return}
  if(!backendPeopleLoaded){$('#view-people').innerHTML=`<div class="section-head"><div><h2>Pessoas e acessos</h2><p>Contas e permissões reais no Supabase.</p></div></div>${empty('A carregar utilizadores…')}`;return}
  const people=backendPeopleRows(),invites=backendPeople.invitations||[];
  $('#view-people').innerHTML=`<div class="section-head"><div><h2>Pessoas e acessos</h2><p>Contas, pedidos de sócio e permissões reais no Supabase.</p></div><div class="inline-actions"><button class="btn secondary" id="refreshPeople">Atualizar</button><button class="btn" id="addUser">＋ Pré-atribuir acesso</button></div></div><div class="info-strip">Qualquer pessoa pode criar uma conta. Sem funções atribuídas, fica como utilizador registado com acesso público. Usa a pré-atribuição para Jogador, Capitão, Equipa técnica ou Admin. Um número de sócio indicado no registo fica por validar até um Admin atribuir a função Sócio.</div><div style="height:12px"></div><div class="card"><div class="card-head"><div><h3>Contas ativas</h3><p>${people.length} conta(s) criada(s)</p></div>${pill('Supabase','green')}</div>${people.length?`<div class="table-wrap"><table><thead><tr><th>Pessoa</th><th>Funções</th><th>Jogador associado</th><th>Sócio</th><th>Estado</th><th></th></tr></thead><tbody>${people.map(u=>`<tr><td><strong>${esc(u.name)}</strong><div class="meta">${esc(u.email||'Sem email')}</div></td><td><div class="tags">${rolePills(u.roles)}</div></td><td>${esc(backendPlayerName(u.backendPlayerId))}</td><td>${memberAccessHtml(u)}</td><td>${u.active?pill('Ativa','green'):pill('Desativada','red')}</td><td><button class="btn secondary sm edit-user" data-id="${u.id}">Editar</button></td></tr>`).join('')}</tbody></table></div>`:empty('Ainda não existem contas.')}</div><div style="height:15px"></div><div class="card"><div class="card-head"><div><h3>Acessos pré-atribuídos</h3><p>Emails que receberão automaticamente funções quando criarem conta.</p></div>${pill(`${invites.length} pendente${invites.length===1?'':'s'}`,invites.length?'amber':'gray')}</div>${invites.length?`<div class="table-wrap"><table><thead><tr><th>Pessoa</th><th>Funções</th><th>Jogador</th><th>Sócio nº</th><th></th></tr></thead><tbody>${invites.map(i=>`<tr><td><strong>${esc(i.display_name||'—')}</strong><div class="meta">${esc(i.email)}</div></td><td><div class="tags">${rolePills(i.roles||[])}</div></td><td>${esc(backendPlayerName(i.player_id))}</td><td>${esc(i.member_number||'—')}</td><td><div class="inline-actions"><button class="btn secondary sm edit-invite" data-id="${i.id}">Editar</button><button class="btn danger sm cancel-invite" data-id="${i.id}">Cancelar</button></div></td></tr>`).join('')}</tbody></table></div>`:empty('Sem acessos pendentes','Usa “Pré-atribuir acesso” quando alguém precisar de funções internas.')}</div>`;
@@ -2356,6 +2514,7 @@ function openInvitation(id=''){
 }
 
 function renderSettings(){
+ if(!backendSession?.user?.id||!backendRoles.includes('admin')){$('#view-settings').innerHTML=empty('Sem acesso','Apenas administradores podem consultar as definições.');return}
  const diag={players:state.players.length,games:state.games.length,trainings:state.trainings.length,results:state.competitionResults.length,seasons:state.seasons.length,matchPlayers:(backendMatchCenter.matchPlayers||[]).length,matchEvents:(backendMatchCenter.events||[]).length,matchWeighIns:(backendMatchCenter.weighIns||[]).length,onlineTrainings:(backendTraining.trainings||[]).length,onlineAttendance:(backendTraining.attendance||[]).length,onlineWeighIns:(backendTraining.weighIns||[]).length,onlineFineRules:(backendFines.rules||[]).length,onlineFines:(backendFines.fines||[]).length};
  const autoSnap=autoBackupSnapshot();
  const bSeason=backendActiveSeason(),bClub=backendClubTeam();
@@ -2381,16 +2540,17 @@ function renderSettings(){
   {label:'Contas e permissões',ok:backendPeopleLoaded,detail:backendPeopleLoaded?'Ligado':'Pendente'},
   {label:'Notificações',ok:backendNotificationScheduleLoaded,detail:backendNotificationScheduleLoaded?'Configuração online':'Pendente'},
   {label:'Privacidade',ok:backendPrivacyLoaded,detail:backendPrivacyLoaded?(privacyAcknowledged()?'Política atual confirmada':'Política online · falta confirmar nesta conta'):'Configuração de privacidade pendente'},
+   {label:'Plano alimentar privado',ok:backendNutritionLoaded,detail:backendNutritionLoaded?'Armazenado no Supabase com acesso interno':'Migração e testes pendentes'}, 
   {label:'SMTP de produção',ok:true,detail:'Configurado e validado'}
  ];
  const releaseBlocking=releaseChecks.filter(x=>!x.ok);
- const releaseStatus=releaseBlocking.length?pill(`${releaseBlocking.length} ponto(s) a verificar`,'amber'):pill('Produção pronta','green');
+ const releaseStatus=releaseBlocking.length?pill(`${releaseBlocking.length} ponto(s) a verificar`,'amber'):pill('Verificações técnicas concluídas','green');
  const releaseChecksHtml=releaseChecks.map(x=>`<div class="release-check-item"><div><strong>${esc(x.label)}</strong><small>${esc(x.detail)}</small></div>${pill(x.ok?'OK':'Verificar',x.ok?'green':'amber')}</div>`).join('');
- const permissionMatrix=`<div class="permission-matrix"><div><strong>Público / Registado / Sócio</strong><span>Área pública; sem treinos, pesagens, multas ou convocatórias futuras.</span></div><div><strong>Jogador</strong><span>Plantel, treinos, pesagens e Match Center interno em leitura.</span></div><div><strong>Capitão</strong><span>Acessos de jogador + gestão de multas individuais; não altera regras.</span></div><div><strong>Equipa Técnica</strong><span>Edita jogos, treino, presenças, pesagens, notificações e regras de multas.</span></div><div><strong>Admin</strong><span>Gestão total, incluindo utilizadores, funções, épocas e definições.</span></div></div>`;
+ const permissionMatrix=`<div class="permission-matrix"><div><strong>Público / Registado / Sócio</strong><span>Plantel e Match Center públicos, incluindo convocatórias publicadas; sem presenças, pesagens, multas ou dados internos.</span></div><div><strong>Jogador</strong><span>Plantel, treinos, pesagens e Match Center interno em leitura.</span></div><div><strong>Capitão</strong><span>Acessos de jogador + gestão de multas individuais; não altera regras.</span></div><div><strong>Equipa Técnica</strong><span>Edita jogos, treino, presenças, pesagens, notificações e regras de multas.</span></div><div><strong>Admin</strong><span>Gestão total, incluindo utilizadores, funções, épocas e definições.</span></div></div>`;
  const backendSummary=backendReferenceLoaded
   ?`<div class="diagnostic-grid"><div><span>Ligação</span><strong>Online</strong></div><div><span>Época ativa</span><strong>${esc(bSeason?.label||'—')}</strong></div><div><span>Clube</span><strong>${esc(bClub?.short_name||bClub?.name||'—')}</strong></div><div><span>Competições</span><strong>${bCompetitions.length}</strong></div><div><span>Equipas</span><strong>${bTeams.length}</strong></div><div><span>Schema backend</span><strong>${esc(String(backendReference.settings?.schema_version??'—'))}</strong></div></div><div class="tags" style="margin-top:12px">${bCompetitions.map(c=>pill(c.name,c.competition_type==='league'?'green':c.competition_type==='cup'?'amber':'gray')).join('')}</div>`
   :`<div class="warning-strip">Ainda não foi possível carregar os dados de referência do Supabase.</div>`;
- $('#view-settings').innerHTML=`<div class="settings-stack"><div class="card release-check-card"><div class="card-head"><div><h3>V1.2 · Produção</h3><p>Versão de produção aprovada após validação funcional, SMTP/Auth e auditoria de segurança.</p></div>${releaseStatus}</div><div class="release-check-grid">${releaseChecksHtml}</div><div style="height:12px"></div><div class="note"><strong>Produção pronta:</strong> SMTP próprio configurado, templates de email aplicados e fluxos de recuperação e criação de conta validados.</div><div class="form-actions"><button class="btn" id="runReleaseAudit">Executar auditoria final</button><button class="btn secondary" id="exportReleaseSnapshot">Exportar snapshot de release</button><button class="btn secondary" id="cleanupKnownTests">Limpar notificações de teste</button></div></div><div class="card"><div class="card-head"><div><h3>Matriz de permissões</h3><p>Resumo da auditoria funcional aplicada nesta build.</p></div>${pill('V1.2','green')}</div>${permissionMatrix}</div><div class="card"><div class="card-head"><div><h3>Dados de referência online</h3><p>A V3 já lê época, competições e equipas diretamente do Supabase.</p></div>${pill(backendReferenceLoaded?'Sincronizado':'Pendente',backendReferenceLoaded?'green':'amber')}</div>${backendSummary}<div class="form-actions"><button class="btn secondary" id="refreshBackendReference">Atualizar dados online</button></div><div class="note">Época, competições e equipas já vêm do backend.</div></div><div class="card"><div class="card-head"><div><h3>Plantel online</h3><p>Jogadores da época ativa guardados no Supabase.</p></div>${pill(rosterCount?`${rosterCount} jogadores`:'Ainda local',rosterCount?'green':'amber')}</div>${rosterCount?`<div class="note">O Plantel já está a ser carregado do Supabase. Alterações de nome, número, posição e estado feitas na V3 ficam guardadas online.</div><div class="form-actions"><button class="btn secondary" id="refreshBackendRoster">Atualizar plantel online</button></div>`:`<div class="warning-strip">O plantel ainda não foi migrado. O botão abaixo cria no Supabase os ${state.players.length} jogadores atualmente existentes na V3.</div><div class="form-actions"><button class="btn" id="createBackendRoster">Criar plantel online</button></div>`}</div><div class="card"><div class="card-head"><div><h3>Calendário e resultados online</h3><p>Jogos da época ativa guardados centralmente no Supabase.</p></div>${pill(onlineMatchCount?`${onlineMatchCount} jogos`:'Ainda local',onlineMatchCount?'green':'amber')}</div>${onlineMatchCount?`<div class="note">O calendário, os resultados e os jogos do ADC Figueiras já são carregados do Supabase. As alterações feitas na V3 ficam disponíveis noutros dispositivos.</div><div class="form-actions"><button class="btn secondary" id="refreshBackendMatches">Atualizar jogos online</button></div>`:`<div class="warning-strip">O calendário ainda está local. O botão abaixo envia o calendário completo do campeonato e os jogos adicionais já existentes para o Supabase.</div><div class="form-actions"><button class="btn" id="createBackendMatches">Criar calendário online</button></div>`}</div><div class="card"><div class="card-head"><div><h3>Match Center online</h3><p>Convocatórias, utilização, 5 inicial, capitão, acontecimentos e pesagens de jogo no Supabase.</p></div>${pill(backendMatchCenterLoaded?'Ligado':'Pendente',backendMatchCenterLoaded?'green':'amber')}</div><div class="diagnostic-grid"><div><span>Jogadores em fichas</span><strong>${diag.matchPlayers}</strong></div><div><span>Acontecimentos</span><strong>${diag.matchEvents}</strong></div><div><span>Pesagens de jogo</span><strong>${diag.matchWeighIns}</strong></div></div>${localMatchCenterGames&&onlineMatchCenterCount===0?`<div class="warning-strip">Foram encontrados dados de Match Center em ${localMatchCenterGames} jogo(s) apenas neste browser. Migra-os antes de continuares a editar esses jogos.</div><div class="form-actions"><button class="btn" id="migrateBackendMatchCenter">Migrar Match Center existente</button></div>`:`<div class="note">A partir desta versão, alterações à convocatória e acontecimentos dos jogos ficam guardadas online.</div><div class="form-actions"><button class="btn secondary" id="refreshBackendMatchCenter">Atualizar Match Center online</button></div>`}</div><div class="card"><div class="card-head"><div><h3>Treinos, presenças e pesagens online</h3><p>Sessões de treino, assiduidade e pesos guardados centralmente no Supabase.</p></div>${pill(localTrainingCount&&onlineTrainingCount===0?'Por migrar':backendTrainingLoaded?`${onlineTrainingCount} treinos`:'Pendente',localTrainingCount&&onlineTrainingCount===0?'amber':backendTrainingLoaded?'green':'amber')}</div><div class="diagnostic-grid"><div><span>Treinos online</span><strong>${diag.onlineTrainings}</strong></div><div><span>Presenças registadas</span><strong>${diag.onlineAttendance}</strong></div><div><span>Pesagens</span><strong>${diag.onlineWeighIns}</strong></div></div>${localTrainingCount&&onlineTrainingCount===0?`<div class="warning-strip">Existem ${localTrainingCount} treino(s) neste browser que ainda não estão no Supabase.</div><div class="form-actions"><button class="btn" id="migrateBackendTrainings">Migrar treinos existentes</button></div>`:`<div class="note">Novos treinos e alterações de presenças/pesagens são guardados online e ficam disponíveis noutros dispositivos.</div><div class="form-actions"><button class="btn secondary" id="refreshBackendTrainings">Atualizar treinos online</button></div>`}</div><div class="card"><div class="card-head"><div><h3>Multas e regras online</h3><p>Regras, multas manuais e multas automáticas por atraso guardadas no Supabase.</p></div>${pill(backendFinesLoaded?'Ligado':'Pendente',backendFinesLoaded?'green':'amber')}</div><div class="diagnostic-grid"><div><span>Regras online</span><strong>${diag.onlineFineRules}</strong></div><div><span>Multas online</span><strong>${diag.onlineFines}</strong></div></div>${localFineRules||localManualFines?`<div class="warning-strip">Existem ${localFineRules} regra(s) e ${localManualFines} multa(s) manual(is) apenas neste browser.</div><div class="form-actions"><button class="btn" id="migrateBackendFines">Migrar multas existentes</button></div>`:`<div class="note">As multas já são carregadas do Supabase. Atrasos ao treino criam ou anulam automaticamente a respetiva multa no backend.</div><div class="form-actions"><button class="btn secondary" id="refreshBackendFines">Atualizar multas online</button></div>`}</div><div class="card"><div class="card-head"><div><h3>Contas e permissões online</h3><p>Utilizadores, funções e ligações ao plantel guardados no Supabase.</p></div>${pill(backendPeopleLoaded?'Ligado':'Pendente',backendPeopleLoaded?'green':'amber')}</div><div class="diagnostic-grid"><div><span>Contas</span><strong>${backendPeopleLoaded?backendPeopleRows().length:'—'}</strong></div><div><span>Acessos pré-atribuídos</span><strong>${backendPeopleLoaded?(backendPeople.invitations||[]).length:'—'}</strong></div><div><span>Contas ligadas a jogadores</span><strong>${backendPeopleLoaded?(backendPeople.links||[]).length:'—'}</strong></div></div><div class="form-actions"><button class="btn secondary" id="refreshBackendPeople">Atualizar acessos online</button><button class="btn" id="openPeopleSettings">Gerir pessoas e acessos</button></div></div><div class="card"><div class="card-head"><div><h3>Notificações · horários padrão</h3><p>Horários usados por defeito quando escolhes Programar. Podes sempre alterá-los no momento do envio.</p></div>${pill(backendNotificationScheduleLoaded?'Online':'Predefinições',backendNotificationScheduleLoaded?'green':'amber')}</div><form id="notificationScheduleSettings"><div class="form-grid"><div class="field"><label>DIA DE JOGO!</label><input type="time" name="matchday_time" value="${esc(String(currentNotificationSchedule().matchday_time||'08:00').slice(0,5))}"></div><div class="field"><label>Aviso de treino · horas antes</label><input type="number" name="training_lead_hours" min="0" max="168" step="0.5" value="${esc((Number(currentNotificationSchedule().training_lead_minutes||120)/60).toString())}"></div><div class="field"><label>Plano pré-jogo · dias antes</label><input type="number" name="nutrition_days_before" min="0" max="7" step="1" value="${esc(String(currentNotificationSchedule().nutrition_days_before??1))}"></div><div class="field"><label>Plano pré-jogo · hora</label><input type="time" name="nutrition_time" value="${esc(String(currentNotificationSchedule().nutrition_time||'10:00').slice(0,5))}"></div></div><div class="note">Convocatória e Resultado final têm por defeito <strong>Enviar agora</strong>. DIA DE JOGO, Plano pré-jogo e Treino abrem por defeito já programados para estes horários.</div><div class="form-actions"><button class="btn" id="saveNotificationSchedule">Guardar horários</button></div></form></div><div class="card"><div class="card-head"><div><h3>Plano alimentar pré-jogo</h3><p>Base para a notificação enviada aos convocados na véspera.</p></div>${pill(state.settings.nutritionEnabled?'Ativo':'A aguardar plano',state.settings.nutritionEnabled?'green':'amber')}</div><div class="form-grid"><div class="field"><label>Peso de referência</label><select id="weightReference"><option value="pre" ${state.settings.weightReference==='pre'?'selected':''}>Peso pré-treino</option><option value="post" ${state.settings.weightReference==='post'?'selected':''}>Peso pós-treino</option><option value="mean" ${state.settings.weightReference==='mean'?'selected':''}>Média pré/pós</option></select></div><div class="field full"><label>Template do plano alimentar</label><textarea id="nutritionTemplate" placeholder="Mais tarde colocamos aqui o plano que vais fornecer. Variáveis disponíveis: {{peso_medio}}, {{jogador}}, {{adversario}}, {{data_jogo}}, {{hora_jogo}}.">${esc(state.settings.nutritionTemplate||'')}</textarea></div></div><div class="form-actions"><button class="btn" id="saveNutrition">Guardar configuração</button></div></div><div class="card"><div class="card-head"><div><h3>Classificação da competição</h3><p>Calculada localmente a partir dos resultados da competição.</p></div>${pill('Manual + automática','green')}</div><div class="note">Os resultados dos restantes clubes são introduzidos em <strong>Resultados</strong>. Os jogos do ADC Figueiras entram automaticamente assim que tiverem resultado e estiverem marcados para contar para a classificação.</div><div class="form-actions"><button class="btn secondary" id="openSeriesResultsSettings">Gerir resultados</button></div></div><div class="card backup-card"><div class="card-head"><div><h3>Backup dos dados locais</h3><p>Exporta uma cópia dos dados locais antes de uma atualização importante.</p></div>${pill(state.settings.lastBackupAt?`Último: ${fmtDateTime(state.settings.lastBackupAt)}`:'Nunca criado',state.settings.lastBackupAt?'green':'amber')}</div><div class="inline-actions"><button class="btn" id="exportData">Exportar backup JSON</button><button class="btn secondary" id="importData">Importar backup</button>${autoSnap?'<button class="btn secondary" id="exportAutoBackup">Exportar snapshot automático</button>':''}</div>${autoSnap?`<div class="meta backup-meta">Snapshot automático local: ${fmtDateTime(autoSnap.savedAt)} · guarda o estado anterior à última alteração.</div>`:''}</div><div class="card"><div class="card-head"><div><h3>Diagnóstico da aplicação</h3><p>Resumo técnico desta instalação.</p></div><span class="pill blue">v${APP_VERSION}</span></div><div class="diagnostic-grid"><div><span>Época local</span><strong>${esc(activeSeason()?.label||'—')}</strong></div><div><span>Jogadores carregados</span><strong>${diag.players}</strong></div><div><span>Jogos Figueiras locais</span><strong>${diag.games}</strong></div><div><span>Treinos locais</span><strong>${diag.trainings}</strong></div><div><span>Jogos/resultados locais</span><strong>${diag.results}</strong></div><div><span>Épocas locais</span><strong>${diag.seasons}</strong></div></div></div></div>`;
+ $('#view-settings').innerHTML=`<div class="settings-stack"><div class="card release-check-card"><div class="card-head"><div><h3>Auditoria pré-lançamento</h3><p>Verificação técnica da próxima atualização; ainda sem validação jurídica e testes finais por perfis.</p></div>${releaseStatus}</div><div class="release-check-grid">${releaseChecksHtml}</div><div style="height:12px"></div><div class="warning-strip"><strong>Publicação bloqueada até validação:</strong> testar os fluxos de contas, preservar os backups locais anteriores, confirmar direitos de imagem e rever juridicamente as políticas e os tratamentos de dados sensíveis.</div><div class="form-actions"><button class="btn" id="runReleaseAudit">Executar auditoria final</button><button class="btn secondary" id="exportReleaseSnapshot">Exportar snapshot de release</button><button class="btn secondary" id="cleanupKnownTests">Limpar notificações de teste</button></div></div><div class="card"><div class="card-head"><div><h3>Matriz de permissões</h3><p>Resumo da auditoria funcional aplicada nesta build.</p></div>${pill('V1.2','green')}</div>${permissionMatrix}</div><div class="card"><div class="card-head"><div><h3>Dados de referência online</h3><p>A V3 já lê época, competições e equipas diretamente do Supabase.</p></div>${pill(backendReferenceLoaded?'Sincronizado':'Pendente',backendReferenceLoaded?'green':'amber')}</div>${backendSummary}<div class="form-actions"><button class="btn secondary" id="refreshBackendReference">Atualizar dados online</button></div><div class="note">Época, competições e equipas já vêm do backend.</div></div><div class="card"><div class="card-head"><div><h3>Plantel online</h3><p>Jogadores da época ativa guardados no Supabase.</p></div>${pill(rosterCount?`${rosterCount} jogadores`:'Ainda local',rosterCount?'green':'amber')}</div>${rosterCount?`<div class="note">O Plantel já está a ser carregado do Supabase. Alterações de nome, número, posição e estado feitas na V3 ficam guardadas online.</div><div class="form-actions"><button class="btn secondary" id="refreshBackendRoster">Atualizar plantel online</button></div>`:`<div class="warning-strip">O plantel ainda não foi migrado. O botão abaixo cria no Supabase os ${state.players.length} jogadores atualmente existentes na V3.</div><div class="form-actions"><button class="btn" id="createBackendRoster">Criar plantel online</button></div>`}</div><div class="card"><div class="card-head"><div><h3>Calendário e resultados online</h3><p>Jogos da época ativa guardados centralmente no Supabase.</p></div>${pill(onlineMatchCount?`${onlineMatchCount} jogos`:'Ainda local',onlineMatchCount?'green':'amber')}</div>${onlineMatchCount?`<div class="note">O calendário, os resultados e os jogos do ADC Figueiras já são carregados do Supabase. As alterações feitas na V3 ficam disponíveis noutros dispositivos.</div><div class="form-actions"><button class="btn secondary" id="refreshBackendMatches">Atualizar jogos online</button></div>`:`<div class="warning-strip">O calendário ainda está local. O botão abaixo envia o calendário completo do campeonato e os jogos adicionais já existentes para o Supabase.</div><div class="form-actions"><button class="btn" id="createBackendMatches">Criar calendário online</button></div>`}</div><div class="card"><div class="card-head"><div><h3>Match Center online</h3><p>Convocatórias, utilização, 5 inicial, capitão, acontecimentos e pesagens de jogo no Supabase.</p></div>${pill(backendMatchCenterLoaded?'Ligado':'Pendente',backendMatchCenterLoaded?'green':'amber')}</div><div class="diagnostic-grid"><div><span>Jogadores em fichas</span><strong>${diag.matchPlayers}</strong></div><div><span>Acontecimentos</span><strong>${diag.matchEvents}</strong></div><div><span>Pesagens de jogo</span><strong>${diag.matchWeighIns}</strong></div></div>${localMatchCenterGames&&onlineMatchCenterCount===0?`<div class="warning-strip">Foram encontrados dados de Match Center em ${localMatchCenterGames} jogo(s) apenas neste browser. Migra-os antes de continuares a editar esses jogos.</div><div class="form-actions"><button class="btn" id="migrateBackendMatchCenter">Migrar Match Center existente</button></div>`:`<div class="note">A partir desta versão, alterações à convocatória e acontecimentos dos jogos ficam guardadas online.</div><div class="form-actions"><button class="btn secondary" id="refreshBackendMatchCenter">Atualizar Match Center online</button></div>`}</div><div class="card"><div class="card-head"><div><h3>Treinos, presenças e pesagens online</h3><p>Sessões de treino, assiduidade e pesos guardados centralmente no Supabase.</p></div>${pill(localTrainingCount&&onlineTrainingCount===0?'Por migrar':backendTrainingLoaded?`${onlineTrainingCount} treinos`:'Pendente',localTrainingCount&&onlineTrainingCount===0?'amber':backendTrainingLoaded?'green':'amber')}</div><div class="diagnostic-grid"><div><span>Treinos online</span><strong>${diag.onlineTrainings}</strong></div><div><span>Presenças registadas</span><strong>${diag.onlineAttendance}</strong></div><div><span>Pesagens</span><strong>${diag.onlineWeighIns}</strong></div></div>${localTrainingCount&&onlineTrainingCount===0?`<div class="warning-strip">Existem ${localTrainingCount} treino(s) neste browser que ainda não estão no Supabase.</div><div class="form-actions"><button class="btn" id="migrateBackendTrainings">Migrar treinos existentes</button></div>`:`<div class="note">Novos treinos e alterações de presenças/pesagens são guardados online e ficam disponíveis noutros dispositivos.</div><div class="form-actions"><button class="btn secondary" id="refreshBackendTrainings">Atualizar treinos online</button></div>`}</div><div class="card"><div class="card-head"><div><h3>Multas e regras online</h3><p>Regras, multas manuais e multas automáticas por atraso guardadas no Supabase.</p></div>${pill(backendFinesLoaded?'Ligado':'Pendente',backendFinesLoaded?'green':'amber')}</div><div class="diagnostic-grid"><div><span>Regras online</span><strong>${diag.onlineFineRules}</strong></div><div><span>Multas online</span><strong>${diag.onlineFines}</strong></div></div>${localFineRules||localManualFines?`<div class="warning-strip">Existem ${localFineRules} regra(s) e ${localManualFines} multa(s) manual(is) apenas neste browser.</div><div class="form-actions"><button class="btn" id="migrateBackendFines">Migrar multas existentes</button></div>`:`<div class="note">As multas já são carregadas do Supabase. Atrasos ao treino criam ou anulam automaticamente a respetiva multa no backend.</div><div class="form-actions"><button class="btn secondary" id="refreshBackendFines">Atualizar multas online</button></div>`}</div><div class="card"><div class="card-head"><div><h3>Contas e permissões online</h3><p>Utilizadores, funções e ligações ao plantel guardados no Supabase.</p></div>${pill(backendPeopleLoaded?'Ligado':'Pendente',backendPeopleLoaded?'green':'amber')}</div><div class="diagnostic-grid"><div><span>Contas</span><strong>${backendPeopleLoaded?backendPeopleRows().length:'—'}</strong></div><div><span>Acessos pré-atribuídos</span><strong>${backendPeopleLoaded?(backendPeople.invitations||[]).length:'—'}</strong></div><div><span>Contas ligadas a jogadores</span><strong>${backendPeopleLoaded?(backendPeople.links||[]).length:'—'}</strong></div></div><div class="form-actions"><button class="btn secondary" id="refreshBackendPeople">Atualizar acessos online</button><button class="btn" id="openPeopleSettings">Gerir pessoas e acessos</button></div></div><div class="card"><div class="card-head"><div><h3>Notificações · horários padrão</h3><p>Horários usados por defeito quando escolhes Programar. Podes sempre alterá-los no momento do envio.</p></div>${pill(backendNotificationScheduleLoaded?'Online':'Predefinições',backendNotificationScheduleLoaded?'green':'amber')}</div><form id="notificationScheduleSettings"><div class="form-grid"><div class="field"><label>DIA DE JOGO!</label><input type="time" name="matchday_time" value="${esc(String(currentNotificationSchedule().matchday_time||'08:00').slice(0,5))}"></div><div class="field"><label>Aviso de treino · horas antes</label><input type="number" name="training_lead_hours" min="0" max="168" step="0.5" value="${esc((Number(currentNotificationSchedule().training_lead_minutes||120)/60).toString())}"></div><div class="field"><label>Plano pré-jogo · dias antes</label><input type="number" name="nutrition_days_before" min="0" max="7" step="1" value="${esc(String(currentNotificationSchedule().nutrition_days_before??1))}"></div><div class="field"><label>Plano pré-jogo · hora</label><input type="time" name="nutrition_time" value="${esc(String(currentNotificationSchedule().nutrition_time||'10:00').slice(0,5))}"></div></div><div class="note">Convocatória e Resultado final têm por defeito <strong>Enviar agora</strong>. DIA DE JOGO, Plano pré-jogo e Treino abrem por defeito já programados para estes horários.</div><div class="form-actions"><button class="btn" id="saveNotificationSchedule">Guardar horários</button></div></form></div><div class="card"><div class="card-head"><div><h3>Plano alimentar pré-jogo</h3><p>Base para a notificação enviada aos convocados na véspera.</p></div>${pill(state.settings.nutritionEnabled?'Ativo':'A aguardar plano',state.settings.nutritionEnabled?'green':'amber')}</div>${!backendNutritionLoaded?'<div class="warning-strip">A configuração privada do plano alimentar ainda não foi migrada. Preserva o template anterior e conclui a migração antes de guardar.</div>':''}<div class="form-grid"><div class="field"><label>Peso de referência</label><select id="weightReference"><option value="pre" ${state.settings.weightReference==='pre'?'selected':''}>Peso pré-treino</option><option value="post" ${state.settings.weightReference==='post'?'selected':''}>Peso pós-treino</option><option value="mean" ${state.settings.weightReference==='mean'?'selected':''}>Média pré/pós</option></select></div><div class="field full"><label>Template do plano alimentar</label><textarea id="nutritionTemplate" placeholder="Mais tarde colocamos aqui o plano que vais fornecer. Variáveis disponíveis: {{peso_medio}}, {{jogador}}, {{adversario}}, {{data_jogo}}, {{hora_jogo}}.">${esc(state.settings.nutritionTemplate||'')}</textarea></div></div><div class="form-actions"><button class="btn" id="saveNutrition">Guardar configuração</button></div></div><div class="card"><div class="card-head"><div><h3>Classificação da competição</h3><p>Calculada localmente a partir dos resultados da competição.</p></div>${pill('Manual + automática','green')}</div><div class="note">Os resultados dos restantes clubes são introduzidos em <strong>Resultados</strong>. Os jogos do ADC Figueiras entram automaticamente assim que tiverem resultado e estiverem marcados para contar para a classificação.</div><div class="form-actions"><button class="btn secondary" id="openSeriesResultsSettings">Gerir resultados</button></div></div><div class="card backup-card"><div class="card-head"><div><h3>Backup dos dados locais</h3><p>Exporta uma cópia dos dados locais antes de uma atualização importante.</p></div>${pill(state.settings.lastBackupAt?`Último: ${fmtDateTime(state.settings.lastBackupAt)}`:'Nunca criado',state.settings.lastBackupAt?'green':'amber')}</div><div class="inline-actions"><button class="btn" id="exportData">Exportar backup JSON</button><button class="btn secondary" id="importData">Importar backup</button>${autoSnap?'<button class="btn secondary" id="exportAutoBackup">Exportar snapshot automático</button>':''}</div>${autoSnap?`<div class="meta backup-meta">Snapshot automático local: ${fmtDateTime(autoSnap.savedAt)} · guarda o estado anterior à última alteração.</div>`:''}</div><div class="card"><div class="card-head"><div><h3>Diagnóstico da aplicação</h3><p>Resumo técnico desta instalação.</p></div><span class="pill blue">v${APP_VERSION}</span></div><div class="diagnostic-grid"><div><span>Época local</span><strong>${esc(activeSeason()?.label||'—')}</strong></div><div><span>Jogadores carregados</span><strong>${diag.players}</strong></div><div><span>Jogos Figueiras locais</span><strong>${diag.games}</strong></div><div><span>Treinos locais</span><strong>${diag.trainings}</strong></div><div><span>Jogos/resultados locais</span><strong>${diag.results}</strong></div><div><span>Épocas locais</span><strong>${diag.seasons}</strong></div></div></div></div>`;
  $('#runReleaseAudit')&&($('#runReleaseAudit').onclick=runReleaseAudit);
  $('#exportReleaseSnapshot')&&($('#exportReleaseSnapshot').onclick=exportReleaseSnapshot);
  $('#cleanupKnownTests')&&($('#cleanupKnownTests').onclick=cleanupKnownTestNotifications);
@@ -2409,7 +2569,11 @@ function renderSettings(){
  $('#openPeopleSettings')&&($('#openPeopleSettings').onclick=()=>showView('people'));
  $('#openSeriesResultsSettings').onclick=()=>showView('seriesResults');
  $('#notificationScheduleSettings')&&($('#notificationScheduleSettings').onsubmit=async e=>{e.preventDefault();const fd=new FormData(e.target),b=$('#saveNotificationSchedule');b.disabled=true;b.textContent='A guardar…';try{await saveBackendNotificationSchedule(Object.fromEntries(fd));toast('Horários padrão guardados.');renderView('settings')}catch(err){console.error(err);alert(`Não foi possível guardar os horários.\n\n${err?.message||'Erro desconhecido'}`);b.disabled=false;b.textContent='Guardar horários'}});
- $('#saveNutrition').onclick=()=>{state.settings.weightReference=$('#weightReference').value;state.settings.nutritionTemplate=$('#nutritionTemplate').value.trim();state.settings.nutritionEnabled=!!state.settings.nutritionTemplate;saveState('Configuração guardada.')};
+ $('#saveNutrition').onclick=async()=>{const btn=$('#saveNutrition');btn.disabled=true;btn.textContent='A guardar…';
+  try{await saveBackendNutritionSettings($('#weightReference').value,$('#nutritionTemplate').value);saveState('Plano alimentar guardado no Supabase.')}
+  catch(err){console.error(err);alert('Não foi possível guardar o plano alimentar.\\n\\n'+(err?.message||'Erro desconhecido'))}
+  finally{btn.disabled=false;btn.textContent='Guardar configuração'}
+ };
  $('#exportData').onclick=exportData;
  $('#importData').onclick=()=>$('#importInput').click();
  $('#exportAutoBackup')&&($('#exportAutoBackup').onclick=exportAutoBackup);
@@ -2430,7 +2594,7 @@ async function exportReleaseSnapshot(){
  try{
   const {data,error}=await supabaseClient.rpc('admin_release_snapshot');if(error)throw error;
   const payload={product:'ADC Figueiras',app_version:APP_VERSION,exported_at:new Date().toISOString(),backend:data,local_state:state};
-  const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`adc-figueiras-release-snapshot-${nowKey()}.json`;a.click();URL.revokeObjectURL(a.href);state.settings.lastBackupAt=new Date().toISOString();localStorage.setItem(V2_KEY,JSON.stringify(state));renderView(currentView);toast('Snapshot de release exportado.');
+  const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`adc-figueiras-release-snapshot-${nowKey()}.json`;a.click();URL.revokeObjectURL(a.href);state.settings.lastBackupAt=new Date().toISOString();persistPublicCache();renderView(currentView);toast('Snapshot de release exportado.');
  }catch(err){console.error(err);alert(`Não foi possível exportar o snapshot de release.
 
 ${err?.message||'Erro desconhecido'}`)}finally{if(btn){btn.disabled=false;btn.textContent='Exportar snapshot de release'}}
@@ -2443,17 +2607,17 @@ async function cleanupKnownTestNotifications(){
 ${err?.message||'Erro desconhecido'}`)}finally{if(btn){btn.disabled=false;btn.textContent='Limpar notificações de teste'}}
 }
 
-function exportData(){state.settings.lastBackupAt=new Date().toISOString();localStorage.setItem(V2_KEY,JSON.stringify(state));const blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`adc-figueiras-backup-${nowKey()}.json`;a.click();URL.revokeObjectURL(a.href);renderView(currentView);toast('Backup exportado.')}
+function exportData(){state.settings.lastBackupAt=new Date().toISOString();persistPublicCache();const blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`adc-figueiras-backup-${nowKey()}.json`;a.click();URL.revokeObjectURL(a.href);renderView(currentView);toast('Backup exportado.')}
 function exportAutoBackup(){const snap=autoBackupSnapshot();if(!snap?.data){toast('Ainda não existe snapshot automático.');return}const blob=new Blob([JSON.stringify(snap.data,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`adc-figueiras-snapshot-${nowKey()}.json`;a.click();URL.revokeObjectURL(a.href);toast('Snapshot automático exportado.')}
 
 function openModal(title,subtitle,html,wide=false){$('#modalTitle').textContent=title;$('#modalSubtitle').textContent=subtitle||'';$('#modalBody').innerHTML=html;$('#modal').classList.toggle('wide',!!wide);$('#modalBackdrop').classList.remove('hidden')}
 function closeModal(){$('#modalBackdrop').classList.add('hidden')}
 
 document.addEventListener('click',e=>{const link=e.target.closest('[data-team-link]');if(link){e.preventDefault();e.stopPropagation();openTeamPage(link.dataset.teamLink)}});
-$('#menuBtn').onclick=()=>$('#sidebar').classList.toggle('open');$('#closeModal').onclick=closeModal;$('#modalBackdrop').onclick=e=>{if(e.target===$('#modalBackdrop'))closeModal()};$('#previewMode').onchange=e=>{if(!backendRoles.includes('admin')||guestMode){mode=guestMode?'public':highestBackendRole(backendRoles);renderChrome();return}mode=e.target.value;localStorage.setItem(MODE_KEY,mode);if(!can(currentView))currentView='dashboard';renderChrome();showView(currentView)};$('#seasonSelect').onchange=async e=>{try{await switchSeason(e.target.value)}catch(err){console.error(err);alert(`Não foi possível abrir a época.\n\n${err?.message||'Erro desconhecido'}`)}};$('#notificationBell').onclick=()=>showView('notifications');$('#importInput').onchange=e=>{const file=e.target.files[0];if(!file)return;const r=new FileReader();r.onload=()=>{try{const data=JSON.parse(r.result);if(!data.schemaVersion)throw new Error('Formato inválido');state=normalizeState(data);saveState('Backup importado.')}catch(err){alert('Não foi possível importar este ficheiro.')}};r.readAsText(file);e.target.value=''};
+$('#menuBtn').onclick=()=>$('#sidebar').classList.toggle('open');$('#closeModal').onclick=closeModal;$('#modalBackdrop').onclick=e=>{if(e.target===$('#modalBackdrop'))closeModal()};$('#previewMode').onchange=e=>{if(!backendRoles.includes('admin')||guestMode){mode=guestMode?'public':highestBackendRole(backendRoles);renderChrome();return}mode=e.target.value;localStorage.setItem(MODE_KEY,mode);if(!can(currentView))currentView='dashboard';renderChrome();showView(currentView)};$('#seasonSelect').onchange=async e=>{try{await switchSeason(e.target.value)}catch(err){console.error(err);alert(`Não foi possível abrir a época.\n\n${err?.message||'Erro desconhecido'}`)}};$('#notificationBell').onclick=()=>showView('notifications');$('#importInput').onchange=e=>{const file=e.target.files[0];if(!file)return;if(file.size>15*1024*1024){alert('O backup é demasiado grande.');e.target.value='';return}const r=new FileReader();r.onload=()=>{try{const data=sanitizeImportedSnapshot(JSON.parse(r.result));if(!data||typeof data!=='object'||!data.schemaVersion)throw new Error('Formato inválido');state=normalizeState(data);saveState('Backup importado.')}catch(err){console.warn('Backup rejeitado:',err?.message||'');alert('Não foi possível importar este ficheiro.')}};r.readAsText(file);e.target.value=''};
 window.addEventListener('online',()=>$('#offlineBanner').classList.add('hidden'));window.addEventListener('offline',()=>$('#offlineBanner').classList.remove('hidden'));if(!navigator.onLine)$('#offlineBanner').classList.remove('hidden');
 if('serviceWorker'in navigator&&location.protocol!=='file:'){
- navigator.serviceWorker.register('./sw.js?v=3.15',{updateViaCache:'none'}).then(async reg=>{
+ navigator.serviceWorker.register('./sw.js?v=3.17.0',{updateViaCache:'none'}).then(async reg=>{
   try{await reg.update()}catch(e){console.warn('Não foi possível verificar atualização da PWA.',e)}
  }).catch(e=>console.warn('Não foi possível registar o service worker.',e));
 }

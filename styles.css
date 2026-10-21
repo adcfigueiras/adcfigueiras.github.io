@@ -86,3 +86,34 @@
 .historical-hero{display:flex;align-items:center;justify-content:space-between;gap:18px;background:linear-gradient(135deg,#f7fbf8,#edf7f1)}.historical-position{display:flex;flex-direction:column;align-items:flex-end}.historical-position strong{font-size:38px;line-height:1;color:#087747}.historical-position span{font-size:12px;color:#607068;margin-top:5px}
 .admin-decision-field.hidden,.admin-score-field.hidden{display:none}
 @media(max-width:700px){.historical-banner{margin:0 12px 12px;align-items:flex-start;flex-direction:column}.historical-hero{align-items:flex-start}.historical-position strong{font-size:30px}.historical-competitions{grid-template-columns:1fr}}
+
+/* Calendário: preservar sete dias por linha e permitir consultar toda a semana no telemóvel. */
+.calendar-scroll{max-width:100%;min-width:0;overflow-x:auto;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch;border-radius:15px;scrollbar-width:thin;scrollbar-color:#b8cfc1 transparent}
+.calendar-scroll-hint{display:none}
+@media(max-width:780px){
+ .calendar-scroll{border:1px solid var(--line)}
+ .calendar-scroll .calendar-grid{width:980px;min-width:980px;grid-template-columns:repeat(7,minmax(0,1fr));border:0;border-radius:0}
+ .calendar-scroll .calendar-day{min-height:100px;padding:7px;min-width:0}
+ .calendar-scroll .dow{padding:9px 5px;font-size:11px}
+ .calendar-scroll .cal-event{width:100%;max-width:100%;text-align:left;font-size:10px;line-height:1.35;padding:6px 5px;cursor:pointer;white-space:normal;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;overflow-wrap:anywhere}
+ .calendar-scroll-hint{display:block;margin:0 0 9px;font-size:11px;color:var(--muted);text-align:center}
+}
+
+/* Ligações legais e confirmação informada no registo */
+.legal-consent{display:flex!important;align-items:flex-start;gap:10px;margin:6px 0 0;font-size:12px;line-height:1.55;font-weight:500!important}
+.legal-consent input{flex:0 0 auto!important;width:17px!important;height:17px;margin:1px 0 0;accent-color:var(--green)}
+.legal-consent span{display:block}
+.legal-consent a,.legal-info a{color:var(--green);font-weight:700;text-decoration:underline}
+.legal-info{font-size:11px;line-height:1.55;color:var(--muted);margin:2px 0 8px}
+.legal-links{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;margin-top:8px}
+.legal-links a{font-size:11px;color:inherit;text-decoration:underline;text-underline-offset:2px}
+.sidebar-legal-links{display:flex;flex-wrap:wrap;gap:9px;font-size:10px}
+.sidebar-legal-links a{color:rgba(255,255,255,.8);text-decoration:underline;text-underline-offset:2px}
+.sidebar-legal-links a:focus-visible,.legal-links a:focus-visible,.legal-consent a:focus-visible{outline:2px solid #f7ba44;outline-offset:2px}
+
+
+/* Emblemas indisponíveis: fallback sem handlers JavaScript inline */
+.team-logo.logo-failed img{display:none!important}
+.team-logo.logo-failed .team-logo-fallback{display:grid!important}
+
+

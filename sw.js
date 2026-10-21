@@ -1,4 +1,4 @@
-const CACHE='adc-figueiras-v1-3-production-2';
+const CACHE='adc-figueiras-production-v3-17-0';
 const OFFLINE_URL='./index.html';
 const ASSETS=[
   './index.html','./styles.css','./app.js','./manifest.webmanifest',
@@ -12,7 +12,7 @@ self.addEventListener('install',event=>{
 self.addEventListener('activate',event=>{
  event.waitUntil((async()=>{
   const keys=await caches.keys();
-  await Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)));
+  await Promise.all(keys.filter(k=>(k.startsWith('adc-figueiras-production-')||/^adc-figueiras-v[0-9]/.test(k))&&k!==CACHE).map(k=>caches.delete(k)));
   await self.clients.claim();
  })());
 });
@@ -69,11 +69,14 @@ self.addEventListener('push',event=>{
 
 self.addEventListener('notificationclick',event=>{
  event.notification.close();
- const target=new URL(event.notification.data?.url||'./',self.registration.scope).href;
+ const scope=self.registration.scope;
+ const requested=new URL(event.notification.data?.url||'./',scope).href;
+ const testPath=new URL('adcfigueiras-testes/',scope).href;
+ const target=requested.startsWith(scope)&&!requested.startsWith(testPath)?requested:scope;
  event.waitUntil((async()=>{
   const windows=await clients.matchAll({type:'window',includeUncontrolled:true});
   for(const client of windows){
-   if('focus'in client){
+   if(client.url.startsWith(scope)&&!client.url.startsWith(testPath)&&'focus'in client){
     await client.focus();
     if('navigate'in client)await client.navigate(target);
     return;
